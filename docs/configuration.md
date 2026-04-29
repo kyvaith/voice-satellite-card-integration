@@ -57,10 +57,12 @@ Per-browser overlay appearance, microphone processing, timer behavior, and debug
 | **Custom CSS** | Advanced CSS overrides applied on top of the selected skin |
 | **Hide on-screen countdown** *(Timers)* | Suppresses the countdown pill while a timer is running. The timer still fires and the alert still plays at zero |
 | **Hide timer name on alert** *(Timers)* | Hides the timer name shown below the alert when a timer finishes |
-| **Noise suppression** | Browser-level noise suppression on the microphone input |
-| **Echo cancellation** | Browser-level echo cancellation |
-| **Auto gain control** | Browser-level automatic gain control |
-| **Voice isolation** | AI-based voice isolation (Chrome only) |
+| **Noise suppression** *(Wake Word / STT)* | Browser-level noise suppression on the microphone input. Configurable independently for each capture phase |
+| **Echo cancellation** *(Wake Word / STT)* | Browser-level echo cancellation. Configurable independently for each capture phase |
+| **Auto gain control** *(Wake Word / STT)* | Browser-level automatic gain control. Configurable independently for each capture phase |
+| **Voice isolation** *(Wake Word / STT)* | AI-based voice isolation (Chrome only). Configurable independently for each capture phase |
+| **Follow-up listen delay** *(STT)* | Pause (0-1000 ms) inserted between the assistant finishing speaking and the mic listening again on follow-up turns (continue conversation, `start_conversation`, `ask_question`). Use this if the tail of the response (last word or two) is being captured into your next reply. Common on tablets without hardware echo cancellation, especially with synthesized voices like Piper. Try 300-500 ms; leave at 0 if follow-ups already work cleanly. Default 0 |
+| **Follow-up ready chime** *(STT)* | Play the wake chime when the mic starts listening for a follow-up turn, so you have an audible "speak now" cue. Pairs naturally with a non-zero **Follow-up listen delay**. Default off. `ask_question` always plays the chime regardless of this setting since it is functional UX for that flow |
 | **Debug logging** | Show debug info in the browser console |
 
 ### Screensaver
