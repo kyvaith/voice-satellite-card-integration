@@ -37,15 +37,23 @@ export const sttMicrophoneSchema = [
     name: '',
     title: t(null, 'editor.behavior.microphone_processing_stt', 'Microphone Processing — Speech to Text'),
     flatten: true,
-    schema: [{
-      type: 'grid', name: '', flatten: true,
-      schema: [
-        { name: 'stt_noise_suppression', selector: { boolean: {} } },
-        { name: 'stt_echo_cancellation', selector: { boolean: {} } },
-        { name: 'stt_auto_gain_control', selector: { boolean: {} } },
-        { name: 'stt_voice_isolation', selector: { boolean: {} } },
-      ],
-    }],
+    schema: [
+      {
+        type: 'grid', name: '', flatten: true,
+        schema: [
+          { name: 'stt_noise_suppression', selector: { boolean: {} } },
+          { name: 'stt_echo_cancellation', selector: { boolean: {} } },
+          { name: 'stt_auto_gain_control', selector: { boolean: {} } },
+          { name: 'stt_voice_isolation', selector: { boolean: {} } },
+        ],
+      },
+      {
+        name: 'stt_followup_delay_ms',
+        default: 0,
+        selector: { number: { min: 0, max: 1000, step: 50, mode: 'slider', unit_of_measurement: 'ms' } },
+      },
+      { name: 'stt_followup_chime', default: false, selector: { boolean: {} } },
+    ],
   },
 ];
 
@@ -93,6 +101,8 @@ export const behaviorLabels = {
   stt_echo_cancellation: t(null, 'editor.behavior.echo_cancellation', 'Echo cancellation'),
   stt_auto_gain_control: t(null, 'editor.behavior.auto_gain_control', 'Auto gain control'),
   stt_voice_isolation: t(null, 'editor.behavior.voice_isolation', 'Voice isolation (Chrome only)'),
+  stt_followup_delay_ms: t(null, 'editor.behavior.stt_followup_delay_ms', 'Follow-up listen delay'),
+  stt_followup_chime: t(null, 'editor.behavior.stt_followup_chime', 'Follow-up ready chime'),
 };
 
 export const behaviorHelpers = {
@@ -102,4 +112,6 @@ export const behaviorHelpers = {
   stt_voice_isolation: t(null, 'editor.behavior.helper_voice_isolation', 'AI-based voice isolation, currently only available in Chrome'),
   hide_timer_pills: t(null, 'editor.behavior.helper_hide_timer_pills', 'Hide the countdown pill on screen. Timers still run and the alert still fires when they finish.'),
   hide_timer_name_on_alert: t(null, 'editor.behavior.helper_hide_timer_name_on_alert', 'When a timer finishes, hide the timer name shown below the alert.'),
+  stt_followup_delay_ms: t(null, 'editor.behavior.helper_stt_followup_delay_ms', 'Pause between the assistant finishing speaking and the mic listening again on follow-up turns. Use this if the tail of the response (last word or two) is being captured into your next reply. Common on tablets without hardware echo cancellation, especially with synthesized voices like Piper. Try 300-500 ms; leave at 0 if follow-ups already work cleanly.'),
+  stt_followup_chime: t(null, 'editor.behavior.helper_stt_followup_chime', 'Play the wake chime when the mic starts listening for a follow-up turn, so you have an audible "speak now" cue. Pairs naturally with a non-zero follow-up listen delay.'),
 };

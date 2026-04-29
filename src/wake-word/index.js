@@ -541,6 +541,17 @@ export class WakeWordManager {
       session.pipeline.pendingRunEnd = false;
     }
 
+    // Cancel a pending follow-up listen delay (user wake-worded over a
+    // continue-conversation pause).  Drop the mute the timer set, then
+    // fall through to the normal wake flow — the muting below will
+    // re-apply for the wake chime path.
+    if (session._followupDelayTimer) {
+      this._log.log('wake-word', 'Cancelling pending follow-up delay - wake word fired during handoff');
+      clearTimeout(session._followupDelayTimer);
+      session._followupDelayTimer = null;
+      session.audio.setMicTracksMuted(false);
+    }
+
     // Clear previous interaction state
     if (session.pipeline.intentErrorBarTimeout) {
       clearTimeout(session.pipeline.intentErrorBarTimeout);

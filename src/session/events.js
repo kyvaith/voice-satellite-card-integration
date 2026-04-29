@@ -12,7 +12,7 @@ import { State, INTERACTING_STATES, BlurReason, Timing } from '../constants.js';
 import { subscribeSatelliteEvents, teardownSatelliteSubscription } from '../shared/satellite-subscription.js';
 import { dispatchSatelliteEvent } from '../shared/satellite-notification.js';
 import { getSwitchState, getSelectState, getNumberState, getSatelliteAttr } from '../shared/satellite-state.js';
-import { setChimeDurationOverrides } from '../audio/chime.js';
+import { setChimeDurationOverrides, getChimeDuration, CHIME_WAKE } from '../audio/chime.js';
 
 const WAKE_MODE_HA = 'home-assistant';
 const WAKE_MODE_LOCAL = 'on-device';
@@ -311,6 +311,100 @@ export async function startListening(session) {
 }
 
 /**
+ * Run the configured "follow-up handoff" before starting STT capture.
+ *
+ * Used by every code path that hands a session off from TTS playback into
+ * a fresh STT turn: the continue-conversation branch in `onTTSComplete`,
+ * `start_conversation` after its prompt finishes, and any future caller
+ * that wants the same protective behaviour.  The handoff:
+ *
+ *   1. Mutes mic tracks so the worklet feeds silence during the window.
+ *   2. Waits `stt_followup_delay_ms` so the OS audio buffer can drain
+ *      past whatever the browser AEC failed to cancel.
+ *   3. (Optional) plays the wake chime and waits its duration + 250 ms.
+ *   4. Unmutes the mic, clears the worklet output buffer, runs the
+ *      caller's `onReady` callback (which typically calls
+ *      `pipeline.restartContinue(...)`).
+ *
+ * If both the delay and the chime are off, `onReady` is invoked
+ * synchronously with no mute/timer dance, preserving the legacy code
+ * path verbatim.
+ *
+ * Cancellation: any caller can stop a pending handoff by clearing
+ * `session._followupDelayTimer` — wake-word detection and session
+ * teardown both do this.  The mic must be unmuted by the caller in
+ * that case (wake-word/index.js handles it).
+ *
+ * @param {import('./index.js').VoiceSatelliteSession} session
+ * @param {() => void} onReady  Invoked once the handoff window is over.
+ * @param {object}   [opts]
+ * @param {string}   [opts.logTag='Follow-up']  Label used in pipeline logs.
+ * @param {boolean}  [opts.forceChime=false]   Always play the wake chime,
+ *   regardless of the user's `stt_followup_chime` setting.  Used by flows
+ *   where the chime is functional (e.g. `ask_question` needs it as the
+ *   "speak now" cue) rather than optional.
+ */
+export function performFollowupHandoff(session, onReady, opts = {}) {
+  const tag = opts.logTag || 'Follow-up';
+  const followupDelayMs = Number(session.config.stt_followup_delay_ms) || 0;
+  const followupChime = opts.forceChime || !!session.config.stt_followup_chime;
+
+  if (followupDelayMs <= 0 && !followupChime) {
+    onReady();
+    return;
+  }
+
+  session.logger.log(
+    'pipeline',
+    `${tag} handoff: delay=${followupDelayMs}ms chime=${followupChime} - muting mic tracks`,
+  );
+  // Defensive: clear any stale timer if a previous handoff is in flight.
+  if (session._followupDelayTimer) {
+    clearTimeout(session._followupDelayTimer);
+  }
+  session.audio.setMicTracksMuted(true);
+
+  const finish = () => {
+    session.audio.setMicTracksMuted(false);
+    session.audio.audioBuffer = [];
+    onReady();
+  };
+
+  const afterDelay = () => {
+    session._followupDelayTimer = null;
+    if (followupDelayMs > 0) {
+      session.logger.log('pipeline', `${tag} delay (${followupDelayMs}ms) elapsed`);
+    }
+    if (!followupChime) {
+      session.logger.log('pipeline', `${tag} handoff complete - starting STT`);
+      finish();
+      return;
+    }
+    // Mirror the wake-word path: play the chime, then wait its real
+    // duration plus the same speaker drain margin so the chime can't
+    // bleed into the new STT capture.
+    const chimeMs = getChimeDuration(CHIME_WAKE) * 1000;
+    const chimeWait = chimeMs + 250;
+    session.logger.log(
+      'pipeline',
+      `${tag} ready chime - playing wake chime (${chimeMs.toFixed(0)}ms + 250ms drain)`,
+    );
+    session.tts.playChime('wake');
+    session._followupDelayTimer = setTimeout(() => {
+      session._followupDelayTimer = null;
+      session.logger.log('pipeline', `${tag} chime+drain complete - starting STT`);
+      finish();
+    }, chimeWait);
+  };
+
+  if (followupDelayMs > 0) {
+    session._followupDelayTimer = setTimeout(afterDelay, followupDelayMs);
+  } else {
+    afterDelay();
+  }
+}
+
+/**
  * Handle TTS playback completion.
  * @param {import('./index.js').VoiceSatelliteSession} session
  * @param {boolean} [playbackFailed]
@@ -334,8 +428,12 @@ export function onTTSComplete(session, playbackFailed) {
     session.pipeline.clearContinueState();
     session.chat.streamEl = null;
 
-    // Keep blur, bar, and chat visible
-    session.pipeline.restartContinue(conversationId, { wake_word_slot: slot });
+    // Optional pause + ready-chime before the follow-up STT starts
+    // listening.  See performFollowupHandoff for what the window does
+    // and why.  Keep blur, bar, and chat visible across the handoff.
+    performFollowupHandoff(session, () => {
+      session.pipeline.restartContinue(conversationId, { wake_word_slot: slot });
+    });
     return;
   }
 

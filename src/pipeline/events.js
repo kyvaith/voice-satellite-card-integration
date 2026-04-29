@@ -500,6 +500,16 @@ export function handleError(mgr, errorData) {
         // Skip the "done" chime — the whole point of this branch is
         // that the losing tablet should make zero sound.
       }
+      // Surface a silent info toast so the user can tell why this tablet
+      // didn't respond when the wake word was clearly heard.  Info
+      // severity auto-dismisses after 4s and toasts never play audio,
+      // so the "losing tablet stays silent" guarantee is preserved.
+      mgr.card.toast?.show({
+        id: 'pipeline.duplicate-wake-up',
+        severity: 'info',
+        category: 'Wake word',
+        description: 'Another satellite handled this request first.',
+      });
       mgr.restart(0);
       return;
     }
@@ -517,6 +527,16 @@ export function handleError(mgr, errorData) {
       mgr.card.mediaPlayer.resumeAfterInterrupt();
       if (errorCode === 'duplicate_wake_up_detected') {
         mgr.card.wakeWord?.clearPendingWakeLatency?.();
+        // Late duplicate (chime already played, dedupe window passed):
+        // surface the same info toast as the silent-abort branch so the
+        // user knows why the interaction stopped.  Info severity auto-
+        // dismisses after 4s and never plays audio.
+        mgr.card.toast?.show({
+          id: 'pipeline.duplicate-wake-up',
+          severity: 'info',
+          category: 'Wake word',
+          description: 'Another satellite handled this request first.',
+        });
       }
       if (getSwitchState(mgr.card.hass, mgr.card.config.satellite_entity, 'wake_sound') !== false) {
         mgr.card.tts.playChime('done');

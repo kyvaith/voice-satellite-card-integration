@@ -57,7 +57,6 @@ export const Timing = {
   RETRY_BASE_DELAY: 5000,
   VISIBILITY_DEBOUNCE: 500,
   DISCONNECT_GRACE: 100,
-  CHIME_SETTLE: 500,
   IMAGE_LINGER: 30000,
   IDLE_DEBOUNCE: 200,
   AUTH_SIGN_EXPIRES: 3600,
@@ -88,6 +87,16 @@ export const DEFAULT_CONFIG = {
   stt_echo_cancellation: true,
   stt_auto_gain_control: true,
   stt_voice_isolation: false,
+  // Extra pause inserted between TTS playback ending and STT starting on
+  // continue-conversation follow-up turns.  Default 0 (no delay).  Lets
+  // users on hardware where browser AEC under-cancels the TTS engine
+  // (e.g. Piper on a small tablet) avoid the speaker tail bleeding into
+  // the next STT capture.  See onTTSComplete in session/events.js.
+  stt_followup_delay_ms: 0,
+  // Play the wake chime to signal the mic is ready on follow-up turns.
+  // Off by default (the existing flow continues silently).  Useful as an
+  // audible "speak now" cue when paired with a follow-up listen delay.
+  stt_followup_chime: false,
 
   // Timers
   hide_timer_pills: false,

@@ -338,6 +338,7 @@ export class VoiceSatelliteSession {
     const sessionKeys = [
       'satellite_entity', 'debug',
       ...micKeys,
+      'stt_followup_delay_ms', 'stt_followup_chime',
       'reactive_bar', 'reactive_bar_update_interval_ms',
       'hide_timer_pills', 'hide_timer_name_on_alert',
       'screensaver_enabled', 'screensaver_timer_s', 'screensaver_dim_percent', 'screensaver_type',
@@ -437,6 +438,11 @@ export class VoiceSatelliteSession {
     if (this._imageLingerTimeout) {
       clearTimeout(this._imageLingerTimeout);
       this._imageLingerTimeout = null;
+    }
+    if (this._followupDelayTimer) {
+      clearTimeout(this._followupDelayTimer);
+      this._followupDelayTimer = null;
+      try { this._audio.setMicTracksMuted(false); } catch (_) { /* ignore */ }
     }
     try { this._wakeWord?.release(); } catch (e) { this._logger.log('session', `wakeWord.release: ${e.message || e}`); }
     try { this._pipeline.stop(); } catch (e) { this._logger.log('session', `pipeline.stop: ${e.message || e}`); }

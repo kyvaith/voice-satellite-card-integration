@@ -38,6 +38,10 @@ export class TtsManager {
     this._streamingUrl = null;
     this._playbackWatchdog = null;
     this._lastWatchdogTime = 0;
+    // Diagnostic timing - captured at play() and the duration event so the
+    // 'Playback complete' log can show elapsed-vs-expected in one line.
+    this._playStartTs = 0;
+    this._serverDuration = 0;
 
     // Retry fallback - tts-end URL stored for retry on playback failure
     this._pendingTtsEndUrl = null;
@@ -72,6 +76,10 @@ export class TtsManager {
   play(urlPath, isRetry, mediaId) {
     const url = buildMediaUrl(urlPath);
     this._playing = true;
+    // Reset diagnostic timing — the 'Playback complete' log will compare
+    // these against the actual end time to detect early stream-close.
+    this._playStartTs = performance.now();
+    this._serverDuration = 0;
 
     // Remote media player target - monitor entity state for completion
     const ttsTarget = this._card.ttsTarget;
@@ -126,7 +134,29 @@ export class TtsManager {
     audio.onended = () => {
       if (handled) return;
       handled = true;
-      this._log.log('tts', 'Playback complete');
+      // Diagnostic timing - shows whether the Audio element fired 'ended'
+      // after playing the full server-measured duration, or short-circuited
+      // (streaming response closed early, decoder dropped a chunk, etc.).
+      // The most diagnostic value is `delta = el.currentTime - server` —
+      // a meaningfully negative number means the element reported `ended`
+      // before the file's bytes had actually been played out.  Wall-clock
+      // elapsed (from tts.play() through play() promise resolution and
+      // playback) is also logged for context but includes browser setup
+      // time so it isn't the right comparator on its own.
+      const elapsedMs = this._playStartTs ? performance.now() - this._playStartTs : 0;
+      const elapsedStr = elapsedMs ? `${(elapsedMs / 1000).toFixed(2)}s` : 'n/a';
+      const serverStr = this._serverDuration ? `${this._serverDuration}s` : 'n/a';
+      const elCt = Number(this._audioEl?.currentTime);
+      const elCtStr = Number.isFinite(elCt) ? `${elCt.toFixed(2)}s` : 'n/a';
+      let delta = '';
+      if (this._serverDuration && Number.isFinite(elCt)) {
+        const diff = elCt - this._serverDuration;
+        delta = ` delta=${diff >= 0 ? '+' : ''}${diff.toFixed(2)}s`;
+      }
+      this._log.log(
+        'tts',
+        `Playback complete - el.currentTime=${elCtStr} server=${serverStr}${delta} (wall=${elapsedStr})`,
+      );
       this._clearWatchdog();
       this._onComplete();
     };
@@ -244,15 +274,51 @@ export class TtsManager {
    * @param {string} [ttsUrl] - TTS proxy URL to correlate with current playback
    */
   setAudioDuration(duration, ttsUrl) {
-    if (!this._playing || !this._remoteTarget || !duration) return;
+    // Log unconditionally — including for browser playback where the
+    // duration is informational only.  Useful for diagnosing TTS-to-STT
+    // bleed issues: comparing the server-measured duration against
+    // audio.onended timing tells us whether the Audio element is firing
+    // 'ended' before the bytes have actually finished decoding/playing.
+    // Include audio-element perspective when we have it so the values
+    // are directly comparable in a single log line.
+    const elDuration = Number(this._audioEl?.duration);
+    const elCurrentTime = Number(this._audioEl?.currentTime);
+    const elDurationStr = Number.isFinite(elDuration) ? `${elDuration.toFixed(2)}s` : 'n/a';
+    const elCurrentStr = Number.isFinite(elCurrentTime) ? `${elCurrentTime.toFixed(2)}s` : 'n/a';
 
-    // Ignore stale duration events from a different TTS output
-    if (ttsUrl && this._ttsUrl && ttsUrl !== this._ttsUrl) {
-      this._log.log('tts', `Ignoring stale duration (url mismatch)`);
+    if (!duration) {
+      this._log.log(
+        'tts',
+        `Audio duration unavailable (server measurement failed) — el.duration=${elDurationStr} el.currentTime=${elCurrentStr}`,
+      );
       return;
     }
 
-    this._log.log('tts', `Audio duration received: ${duration}s — setting completion timer`);
+    // Stash for the 'Playback complete' log line so elapsed-vs-expected
+    // can be compared in a single output.
+    if (this._playing) this._serverDuration = duration;
+
+    const baseLog = `server=${duration}s el.duration=${elDurationStr} el.currentTime=${elCurrentStr}`;
+
+    if (!this._playing) {
+      this._log.log('tts', `Audio duration received but not playing (informational): ${baseLog}`);
+      return;
+    }
+    if (!this._remoteTarget) {
+      this._log.log(
+        'tts',
+        `Audio duration received (browser playback - informational only): ${baseLog}`,
+      );
+      return;
+    }
+
+    // Ignore stale duration events from a different TTS output
+    if (ttsUrl && this._ttsUrl && ttsUrl !== this._ttsUrl) {
+      this._log.log('tts', `Ignoring stale duration (url mismatch): ${baseLog}`);
+      return;
+    }
+
+    this._log.log('tts', `Audio duration applied — setting completion timer: ${baseLog}`);
 
     // Replace the 30s safety timeout with a duration-based one (+ 2s buffer)
     if (this._endTimer) {

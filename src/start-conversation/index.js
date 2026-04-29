@@ -13,6 +13,7 @@ import {
 } from '../shared/satellite-notification.js';
 import { sendAck } from '../shared/notification-comms.js';
 import { BlurReason } from '../constants.js';
+import { performFollowupHandoff } from '../session/events.js';
 
 const LOG = 'start-conversation';
 
@@ -70,10 +71,18 @@ export class StartConversationManager {
     this._card.ui.showBlurOverlay(BlurReason.PIPELINE);
 
     const { pipeline } = this._card;
-    if (pipeline) {
+    if (!pipeline) return;
+
+    // Apply the same delay/chime handoff as the continue-conversation
+    // branch in onTTSComplete — the prompt TTS just played and the next
+    // step is STT capture, so the speaker-drain / AEC-failure window
+    // exists here too.  Without this, the user's first response after a
+    // start_conversation prompt skipped the protective pause that every
+    // subsequent turn used.
+    performFollowupHandoff(this._card, () => {
       pipeline.restartContinue(null, {
         extra_system_prompt: ann.extra_system_prompt || null,
       });
-    }
+    }, { logTag: 'start_conversation' });
   }
 }

@@ -14,6 +14,7 @@ import {
 } from '../shared/satellite-notification.js';
 import { sendAck } from '../shared/notification-comms.js';
 import { BlurReason, Timing } from '../constants.js';
+import { performFollowupHandoff } from '../session/events.js';
 import { sendAnswer } from './comms.js';
 
 const LOG = 'ask-question';
@@ -22,7 +23,6 @@ export class AskQuestionManager {
   constructor(card) {
     this._card = card;
     this._log = card.logger;
-    this._chimeSettleTimeout = null;
     this._sttSafetyTimeout = null;
     this._cleanupTimeout = null;
     this._answerSent = false;
@@ -38,9 +38,14 @@ export class AskQuestionManager {
    * and hides the ANNOUNCEMENT blur that playNotification added.
    */
   cancel() {
-    if (this._chimeSettleTimeout) {
-      clearTimeout(this._chimeSettleTimeout);
-      this._chimeSettleTimeout = null;
+    // Cancel an in-flight follow-up handoff (chime + delay window) if
+    // we're mid-handoff when the user double-taps to cancel.  The mute
+    // the helper applied needs to come back off so the next interaction
+    // isn't silently muted.
+    if (this._card._followupDelayTimer) {
+      clearTimeout(this._card._followupDelayTimer);
+      this._card._followupDelayTimer = null;
+      try { this._card.audio.setMicTracksMuted(false); } catch (_) { /* ignore */ }
     }
     if (this._sttSafetyTimeout) {
       clearTimeout(this._sttSafetyTimeout);
@@ -96,21 +101,22 @@ export class AskQuestionManager {
 
     const announceId = ann.id;
 
-    // Play wake chime to signal the user should speak.
-    // Delay STT pipeline start so the mic doesn't pick up the chime
-    // as speech (causes false VAD trigger -> stt-no-text-recognized).
     // Start reactive bar on mic for STT phase. updateForState won't
     // run while playing is true, so we bypass it via startReactive().
     this._card.ui.startReactive();
-
-    this._card.tts.playChime('wake');
-    const chimeDelay = Timing.CHIME_SETTLE;
 
     // Track whether an answer was submitted so the cleanup timeout
     // can release the server if STT never produced a result.
     this._answerSent = false;
 
-    this._chimeSettleTimeout = setTimeout(() => {
+    // Hand off to the unified follow-up window: optional configured
+    // delay (lets the prompt's TTS speaker tail drain before we start
+    // STT) followed by the wake chime as the "speak now" cue.  forceChime
+    // is true here because the chime is functional for ask_question, not
+    // optional like it is for continue-conversation turns.  Without the
+    // delay around the chime, the mic captures it as speech and STT
+    // returns stt-no-text-recognized.
+    performFollowupHandoff(this._card, () => {
       pipeline.restartContinue(null, {
         end_stage: 'stt',
         onSttEnd: (text) => {
@@ -130,7 +136,7 @@ export class AskQuestionManager {
           this._processAnswer(announceId, '');
         }
       }, Timing.ASK_QUESTION_STT_SAFETY);
-    }, chimeDelay);
+    }, { forceChime: true, logTag: 'ask_question' });
   }
 
   /**
@@ -141,10 +147,6 @@ export class AskQuestionManager {
    */
   _processAnswer(announceId, text) {
     // Clear pending timers - we have a result (or explicit empty)
-    if (this._chimeSettleTimeout) {
-      clearTimeout(this._chimeSettleTimeout);
-      this._chimeSettleTimeout = null;
-    }
     if (this._sttSafetyTimeout) {
       clearTimeout(this._sttSafetyTimeout);
       this._sttSafetyTimeout = null;
