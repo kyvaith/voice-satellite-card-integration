@@ -127,6 +127,8 @@ See the [Wake Word reference](docs/wake-word.md) for built-in models, custom mod
 
 Eight built-in skins (Default, Alexa, Google Home, Home Assistant, Lens Flares, Retro Terminal, Siri, Waveform) theme the overlay, timer pills, and activity bar. Every skin can be further tweaked via the **Custom CSS** field in the sidebar panel, and the Waveform skin exposes dedicated CSS variables for per-strand color control. Built-in chime sounds (`wake`, `done`, `error`, `alert`, `announce`) can be replaced with your own MP3s that survive HACS updates.
 
+<img src="https://raw.githubusercontent.com/jxlarrea/voice-satellite-card-integration/refs/heads/main/assets/screenshots/lensflare.png" alt="Lens Flare Skins" width="100%"/>
+
 <img src="https://raw.githubusercontent.com/jxlarrea/voice-satellite-card-integration/refs/heads/main/assets/screenshots/skins.jpg" alt="Skins" width="100%"/>
 
 See the [Skins & Customization reference](docs/customization.md) for the skin list, CSS variable tables, and the custom sounds folder layout.
