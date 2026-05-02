@@ -299,6 +299,10 @@
 }
 
 /* ─── Timer Container ───────────────────────────────────────────── */
+/* The timer container is appended to document.body as a sibling of
+   #voice-satellite-ui, so the --lf-* tokens defined under that scope
+   don't cascade in. Hardcode the palette values here (Lens Flares is
+   dark-only by design). */
 
 .vs-timer-container {
   position: fixed;
@@ -317,13 +321,13 @@
   overflow: hidden;
   contain: content;
   font-size: calc(28px * var(--vs-text-scale, 1));
-  color: var(--lf-text);
+  color: #e6ecff;
   font-weight: bold;
-  background: var(--lf-surface);
+  background: #0a0e1a;
   border: none;
   padding: 14px 18px;
   border-radius: 18px;
-  box-shadow: 0 1px 3px var(--lf-shadow), 0 4px 8px var(--lf-shadow-lg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55), 0 4px 8px rgba(0, 0, 0, 0.65);
   animation: lf-timer-fade-in 0.3s ease forwards;
   pointer-events: auto;
   cursor: default;
@@ -335,7 +339,7 @@
   position: absolute;
   top: 0; left: 0;
   height: 100%;
-  background: var(--lf-progress);
+  background: rgba(80, 160, 255, 0.20);
   opacity: 1;
   transition: width 1s linear;
   pointer-events: none;
@@ -364,13 +368,13 @@
   gap: 12px;
   font-size: calc(28px * var(--vs-text-scale, 1));
   font-family: "Google Sans", Roboto, Noto, sans-serif;
-  color: var(--lf-text);
+  color: #e6ecff;
   font-weight: bold;
-  background: var(--lf-surface);
+  background: #0a0e1a;
   border: none;
   padding: 18px 24px;
   border-radius: 18px;
-  box-shadow: 0 2px 6px var(--lf-shadow), 0 8px 24px var(--lf-shadow-lg);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55), 0 8px 24px rgba(0, 0, 0, 0.65);
   z-index: 10002;
   animation: lf-alert-pulse 1.5s ease-in-out infinite;
   user-select: none;

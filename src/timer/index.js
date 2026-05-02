@@ -120,7 +120,14 @@ export class TimerManager {
       const serverStartedAt = raw.started_at ? raw.started_at * 1000 : now;
 
       if (existing) {
-        if (existing.totalSeconds !== raw.total_seconds) {
+        // Trust the server's started_at as the source of truth. Comparing
+        // total_seconds alone would miss UPDATED events that happen to
+        // leave the remaining time unchanged (e.g. add then remove the
+        // same amount, or pause/unpause).
+        if (
+          existing.totalSeconds !== raw.total_seconds
+          || existing.startedAt !== serverStartedAt
+        ) {
           existing.totalSeconds = raw.total_seconds;
           existing.startedAt = serverStartedAt;
           const elapsed = Math.max(0, Math.floor((now - serverStartedAt) / 1000));
