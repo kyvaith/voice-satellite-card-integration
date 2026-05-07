@@ -384,21 +384,35 @@ export class MediaPlayerManager {
   }
 
   /**
-   * Keep the in-app screensaver from re-activating during a long video
-   * or camera stream. Pings notifyActivity at a safe margin under the
-   * minimum allowed screensaver timer (10s, clamped in the screensaver
-   * manager); 4s gives at least two pings inside that window so the
-   * idle timer never expires. The session-level interaction keepalive
-   * handles the external (Fully Kiosk) screensaver during voice flows
-   * on top of playback.
+   * Keep the in-app screensaver (and Fully Kiosk's native one) from
+   * re-activating during a long video or camera stream. The 4s ping
+   * sits a safe margin under the minimum allowed in-app screensaver
+   * timer (10s, clamped in the screensaver manager) so the idle timer
+   * never expires; the same callback also calls FK's stopScreensaver
+   * via the JS Interface when running inside Fully Kiosk, so the
+   * external screensaver gets dismissed within 4s of activation
+   * regardless of whether the user has the screensaver_suppress_external
+   * switch configured. Both are no-ops when not applicable.
    */
   _startScreensaverKeepalive() {
     this._stopScreensaverKeepalive();
     this._log.log('media-player', 'Screensaver keepalive started (4s ping)');
-    this._screensaverKeepaliveTimer = setInterval(() => {
-      this._log.log('media-player', 'Screensaver keepalive ping');
-      this._card.screensaver?.notifyActivity();
-    }, 4000);
+    // Fire once immediately so FK's screensaver doesn't get up to 4s of
+    // visibility before the first interval tick.
+    this._screensaverKeepalivePing();
+    this._screensaverKeepaliveTimer = setInterval(
+      () => this._screensaverKeepalivePing(),
+      4000,
+    );
+  }
+
+  _screensaverKeepalivePing() {
+    this._log.log('media-player', 'Screensaver keepalive ping');
+    this._card.screensaver?.notifyActivity();
+    if (typeof window !== 'undefined' && window.fully
+        && typeof window.fully.stopScreensaver === 'function') {
+      try { window.fully.stopScreensaver(); } catch (_e) { /* best-effort */ }
+    }
   }
 
   _stopScreensaverKeepalive() {
