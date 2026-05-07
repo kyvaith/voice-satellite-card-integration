@@ -36,6 +36,10 @@ export class MediaPlayerManager {
     // Unified audio-state tracking (TTS, chimes, notifications)
     this._activeSources = new Set();
     this._idleDebounce = null;
+
+    // Keeps the in-app screensaver from re-activating mid-playback.
+    // Started when a video/image overlay is shown, stopped on cleanup.
+    this._screensaverKeepaliveTimer = null;
   }
 
   get isPlaying() { return this._playing; }
@@ -369,6 +373,40 @@ export class MediaPlayerManager {
     } else {
       this._audio = playMediaUrl(url, this._effectiveVolume(), callbacks);
     }
+
+    // Visual overlays must dismiss the screensaver and prevent it from
+    // re-activating mid-playback - audio-only playback doesn't need this
+    // since it doesn't put anything on screen.
+    if (isVideo || isImage) {
+      this._card.screensaver?.dismiss();
+      this._startScreensaverKeepalive();
+    }
+  }
+
+  /**
+   * Keep the in-app screensaver from re-activating during a long video
+   * or camera stream. Pings notifyActivity at a safe margin under the
+   * minimum allowed screensaver timer (10s, clamped in the screensaver
+   * manager); 4s gives at least two pings inside that window so the
+   * idle timer never expires. The session-level interaction keepalive
+   * handles the external (Fully Kiosk) screensaver during voice flows
+   * on top of playback.
+   */
+  _startScreensaverKeepalive() {
+    this._stopScreensaverKeepalive();
+    this._log.log('media-player', 'Screensaver keepalive started (4s ping)');
+    this._screensaverKeepaliveTimer = setInterval(() => {
+      this._log.log('media-player', 'Screensaver keepalive ping');
+      this._card.screensaver?.notifyActivity();
+    }, 4000);
+  }
+
+  _stopScreensaverKeepalive() {
+    if (this._screensaverKeepaliveTimer) {
+      this._log.log('media-player', 'Screensaver keepalive stopped');
+      clearInterval(this._screensaverKeepaliveTimer);
+      this._screensaverKeepaliveTimer = null;
+    }
   }
 
   /**
@@ -571,6 +609,7 @@ export class MediaPlayerManager {
 
   _removeVideoOverlay() {
     this._destroyHls();
+    this._stopScreensaverKeepalive();
     if (this._videoOverlay) {
       this._videoOverlay.remove();
       this._videoOverlay = null;
@@ -684,6 +723,7 @@ export class MediaPlayerManager {
       this._videoOverlay.remove();
       this._videoOverlay = null;
     }
+    this._stopScreensaverKeepalive();
     this._isLive = false;
     this._playing = false;
     this._paused = false;
