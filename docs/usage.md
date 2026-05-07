@@ -278,4 +278,18 @@ data:
 
 While a video or camera stream is playing, saying the satellite's wake word hides the overlay and runs the voice flow as usual. When the flow finishes, the overlay reappears and playback resumes. For HLS streams the player automatically jumps to the live edge on resume, so you don't watch buffered footage from before the interruption.
 
+**HLS live latency:**
+
+HLS is inherently buffered. With Home Assistant's default `stream` configuration, expect a **2 to 4 second** lag from real time. The integration tunes hls.js (`liveSyncDuration`, `liveMaxLatencyDuration`, `backBufferLength`, `maxLiveSyncPlaybackRate`) to stay close to the live edge and to catch up gracefully if the stream falls behind, but the floor is set server-side by HA's segment duration.
+
+For sub-second latency, enable Low-Latency HLS in your HA `configuration.yaml` and restart Home Assistant:
+
+```yaml
+stream:
+  ll_hls: true
+  part_duration: 0.5
+```
+
+The integration already sends `lowLatencyMode: true` to hls.js, so once HA serves LL-HLS parts the player picks them up automatically with no further configuration on the satellite.
+
 The entity supports play, pause, resume, stop, volume set, and volume mute (volume is a no-op for MJPEG streams, which carry no audio). All commands work from the HA UI, automations, and `media_player.*` services.

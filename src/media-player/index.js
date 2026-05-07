@@ -587,7 +587,30 @@ export class MediaPlayerManager {
         return;
       }
 
-      const hls = new Hls();
+      // Live-latency tuning. HA's stream integration emits 2s segments and
+      // by default tells the player to start ~3s behind live - on top of
+      // hls.js's own default 3-segment buffer, that's typically 6-10s of
+      // lag. The settings below pull playback closer to the live edge:
+      //
+      //   - lowLatencyMode: enable LL-HLS support when HA serves it (HA
+      //     yaml: `stream: { ll_hls: true, part_duration: 0.5 }`). No-op
+      //     on regular HLS streams.
+      //   - liveSyncDuration: target lag from live in seconds. 2 is a
+      //     conservative floor for non-LL-HLS over LAN.
+      //   - liveMaxLatencyDuration: if we fall more than this far behind,
+      //     hls.js seeks forward to catch up rather than playing through.
+      //   - backBufferLength: only keep a few seconds of past content in
+      //     the buffer (default is unbounded), reduces memory pressure on
+      //     long camera streams.
+      //   - maxLiveSyncPlaybackRate: when behind live, speed up to 1.5x
+      //     to catch up smoothly. LL-HLS only; ignored otherwise.
+      const hls = new Hls({
+        lowLatencyMode: true,
+        liveSyncDuration: 2,
+        liveMaxLatencyDuration: 5,
+        backBufferLength: 4,
+        maxLiveSyncPlaybackRate: 1.5,
+      });
       this._hls = hls;
       hls.on(Hls.Events.ERROR, (_e, data) => {
         const level = data.fatal ? 'error' : 'log';
