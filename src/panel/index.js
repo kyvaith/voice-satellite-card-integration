@@ -46,6 +46,18 @@ const STOP_SENSITIVITY_FACTORS = {
   'Moderately sensitive': 1.0,
   'Very sensitive': 1.2,
 };
+// Mirror of the OWW sensitivity offsets in src/wake-word/index.js.  See
+// that file for rationale (absolute offsets vs MWW's margin multiplier).
+const OWW_WAKE_SENSITIVITY_OFFSETS = {
+  'Slightly sensitive':  0.10,
+  'Moderately sensitive': 0.00,
+  'Very sensitive':      -0.10,
+};
+const OWW_STOP_SENSITIVITY_OFFSETS = {
+  'Slightly sensitive':  0.05,
+  'Moderately sensitive': 0.00,
+  'Very sensitive':      -0.05,
+};
 
 
 /* ── Combined schema & labels (mirrors full card editor) ── */
@@ -1802,15 +1814,24 @@ class VoiceSatellitePanel extends HTMLElement {
       this._testerEngine = engine;
       this._testerSelectedModel = name;
       this._testerSensitivity = sensitivity;
-      // openWakeWord wake-word classifiers ship with calibrated 0.5 cutoffs;
-      // stop is bumped to 0.65 (community model is FP-prone at 0.5).
-      // microWakeWord cutoffs come from the per-model JSON manifest.
-      const baseCutoff = engine === 'oww'
-        ? (name === 'stop' ? 0.65 : 0.5)
-        : (getMicroModelParams(name)?.cutoff ?? 0.85);
-      const factors = name === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
-      const factor = factors[sensitivity] ?? 1.0;
-      this._testerThreshold = Math.max(0.1, Math.min(1 - (1 - baseCutoff) * factor, 0.99));
+      // OWW: absolute offset from base cutoff (0.5 wake / 0.65 stop).
+      // MWW: per-model cutoff modulated by the margin-factor sensitivity.
+      // Mirrors getThresholdForModel() in src/wake-word/index.js so the
+      // chart's dashed line lands at the same value the runtime thresholds
+      // against.
+      if (engine === 'oww') {
+        const base = name === 'stop' ? 0.65 : 0.5;
+        const offsets = name === 'stop'
+          ? OWW_STOP_SENSITIVITY_OFFSETS
+          : OWW_WAKE_SENSITIVITY_OFFSETS;
+        const offset = offsets[sensitivity] ?? 0;
+        this._testerThreshold = Math.max(0.1, Math.min(base + offset, 0.99));
+      } else {
+        const baseCutoff = getMicroModelParams(name)?.cutoff ?? 0.85;
+        const factors = name === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
+        const factor = factors[sensitivity] ?? 1.0;
+        this._testerThreshold = Math.max(0.1, Math.min(1 - (1 - baseCutoff) * factor, 0.99));
+      }
       if (thresholdValEl) thresholdValEl.textContent = this._testerThreshold.toFixed(2);
       // Reset chart + peak for the new model
       this._testerProbCount = 0;

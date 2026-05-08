@@ -60,6 +60,24 @@ const STOP_SENSITIVITY_FACTORS = {
   'Moderately sensitive': 1.0,
   'Very sensitive': 1.2,
 };
+// openWakeWord uses absolute offsets from the calibrated upstream cutoff
+// (0.5 wake / 0.65 stop) instead of the MWW margin-multiplier model.  The
+// MWW factors were tuned for cutoffs in the 0.85-0.97 range; reusing them
+// for OWW's much lower 0.5 cutoff produces extreme swings (0.1 - 0.75).
+// Wake words use ±0.10 - "Very sensitive" stops at 0.4 to avoid firing on
+// outputs the OWW classifier is itself uncertain about (sigmoid calibrated
+// around 0.5).  Stop uses gentler ±0.05 since its 0.65 base is already a
+// noisier band and small swings matter more there.
+const OWW_WAKE_SENSITIVITY_OFFSETS = {
+  'Slightly sensitive':  0.10,   // raises cutoff to 0.6 (harder to trigger)
+  'Moderately sensitive': 0.00,
+  'Very sensitive':      -0.10,  // lowers cutoff to 0.4 (easier to trigger)
+};
+const OWW_STOP_SENSITIVITY_OFFSETS = {
+  'Slightly sensitive':  0.05,
+  'Moderately sensitive': 0.00,
+  'Very sensitive':      -0.05,
+};
 const DEFAULT_CUTOFF = 0.90;
 
 // Wake word phrases matching microWakeWord conventions.
@@ -310,18 +328,24 @@ export class WakeWordManager {
    */
   getThresholdForModel(modelName) {
     const label = this._getSensitivityLabel();
-    // openWakeWord classifiers ship with calibrated sigmoid outputs;
-    // the upstream library uses 0.5 as the canonical cutoff and exposes
-    // sensitivity by tuning that.  microWakeWord cutoffs are per-model
-    // and typically much higher (0.85-0.97) since the streaming
-    // sliding-window mean naturally smooths out noise.
-    const baseCutoff = this.getEngine() === 'oww'
-      // OWW wake-word classifiers fire reliably with the upstream-default 0.5
-      // cutoff.  The community OWW stop classifier produces noisier output
-      // and FPs on low-amplitude speech at 0.5; bumped to 0.65 for stop only
-      // so a sustained ~0.65+ smoothed mean is required to fire.
-      ? (modelName === 'stop' ? 0.65 : 0.5)
-      : (getMicroModelParams(modelName).cutoff ?? DEFAULT_CUTOFF);
+    if (this.getEngine() === 'oww') {
+      // OWW: absolute offset from the calibrated upstream cutoff.  Wake
+      // words sit at 0.5 (matches `rhasspy/pyopen-wakeword` and the HA
+      // OWW addon); stop is bumped to 0.65 because the community stop
+      // classifier produces noisier output and FPs on low-amplitude speech.
+      // ±0.15 wake / ±0.05 stop keeps the slider meaningful without
+      // saturating to the [0.1, 0.99] clamp on the extreme settings.
+      const base = modelName === 'stop' ? 0.65 : 0.5;
+      const offsets = modelName === 'stop'
+        ? OWW_STOP_SENSITIVITY_OFFSETS
+        : OWW_WAKE_SENSITIVITY_OFFSETS;
+      const offset = offsets[label] ?? 0;
+      return Math.max(0.1, Math.min(base + offset, 0.99));
+    }
+    // microWakeWord: per-model cutoff from JSON manifest, modulated by the
+    // user-facing sensitivity factor (the tighter the cutoff, the more
+    // selective the detector).
+    const baseCutoff = getMicroModelParams(modelName).cutoff ?? DEFAULT_CUTOFF;
     const table = modelName === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
     const factor = table[label] ?? 1.0;
     const effective = 1 - (1 - baseCutoff) * factor;
