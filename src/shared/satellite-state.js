@@ -122,6 +122,33 @@ export function getSelectOptions(hass, satelliteId, translationKey) {
 }
 
 /**
+ * Read an arbitrary attribute from a select entity (located via its
+ * translation_key on the same device as the satellite entity).  Used
+ * by the panel tester to read both engine catalogs (mww_models +
+ * oww_models) from the wake_word_model entity regardless of which
+ * detection mode is currently active.
+ *
+ * @param {object} hass
+ * @param {string} satelliteId
+ * @param {string} translationKey
+ * @param {string} attrName
+ * @returns {*} The attribute value or undefined.
+ */
+export function getSelectAttribute(hass, satelliteId, translationKey, attrName) {
+  if (!hass?.entities || !satelliteId) return undefined;
+  const satellite = hass.entities[satelliteId];
+  if (!satellite?.device_id) return undefined;
+  for (const [eid, entry] of Object.entries(hass.entities)) {
+    if (entry.device_id === satellite.device_id &&
+        entry.platform === 'voice_satellite' &&
+        entry.translation_key === translationKey) {
+      return hass.states[eid]?.attributes?.[attrName];
+    }
+  }
+  return undefined;
+}
+
+/**
  * Read a switch entity's on/off state directly from the entity registry
  * and state cache, bypassing satellite extra_state_attributes (which can
  * be stale if the state-change listener wasn't set up in time).

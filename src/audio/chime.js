@@ -16,7 +16,7 @@ const SOUNDS_BASE = '/voice_satellite/sounds';
 /** Chime definitions.
  *
  *  Only the URL is canonical.  The `duration` field is a conservative
- *  fallback used before the browser has loaded the MP3's metadata —
+ *  fallback used before the browser has loaded the MP3's metadata -
  *  callers that schedule a post-chime unmute should prefer
  *  `getChimeDuration(chime)` which returns the real file length read
  *  off the cached Audio element's `duration` property.
@@ -122,7 +122,7 @@ export function getChimeDuration(chime) {
 
 /**
  * Play a chime on a remote media player via media_player.play_media.
- * Fire-and-forget — errors are logged but don't block.
+ * Fire-and-forget - errors are logged but don't block.
  */
 function playChimeRemote(card, url, log) {
   const entityId = card.ttsTarget;

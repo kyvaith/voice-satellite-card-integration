@@ -30,9 +30,9 @@ Each satellite device exposes configuration entities on its device page (**Setti
 | **TTS Output** | Select | Where to play TTS audio: "Browser" (default) plays audio locally, or select any `media_player` entity to route TTS to an external speaker |
 | **Wake sound** | Switch | Enable/disable chime sounds (wake, done, error) |
 | **Stop word interruption** | Switch | Opt-in on-device `stop` keyword detection for interruptible states such as timer alerts, TTS playback, and announcements. Disabled by default to avoid extra CPU/memory use on slower devices |
-| **Wake word 1** | Select | Primary wake word model. Built-in models: ok_nabu, hey_jarvis, alexa, hey_mycroft, hey_home_assistant, hey_luna, hey_baby, okay_computer. Custom `.tflite` models are auto-discovered from the `models/` directory |
+| **Wake word 1** | Select | Primary wake word model. The dropdown lists models for the active engine (microWakeWord or openWakeWord) and switches automatically when the engine changes. Custom `.tflite` files are auto-discovered from `config/voice_satellite/models/` (MWW) or `config/voice_satellite/models/openwakeword/` (OWW). See [Built-in Wake Words](wake-word.md#built-in-wake-words) |
 | **Wake word 2** | Select | Optional second wake word model, routed to Pipeline 2. Defaults to "Disabled". When a non-"Disabled" model is picked, both models run in parallel on the shared feature extractor. See [dual wake words](wake-word.md#dual-wake-words-and-pipelines) |
-| **Wake word detection** | Select | "On Device" (default) runs wake word inference locally in the browser. "Home Assistant" uses server-side detection via the pipeline's configured wake word engine. Server-side detection is single-slot only |
+| **Wake word detection** | Select | "On Device (microWakeWord)" *(default)* runs MWW locally on CPU - works on every device, lowest per-chunk latency. "On Device (openWakeWord)" runs OWW with mel + embedding on the GPU and classifiers on the CPU - better speaker / accent generalization, larger models that can mitigate MWW false positives (depending on wake-word quality), near-free multi-keyword scaling; requires a device with WebGPU. "Home Assistant" uses server-side detection via the pipeline's configured wake word engine (single-slot only). "Disabled" leaves the mic off until manually triggered |
 | **Wake word noise gate** | Switch | When enabled, wake word inference is paused during silence and resumes when sound is detected. Reduces CPU usage but may miss soft-spoken wake words. Disabled by default |
 | **Wake word sensitivity** | Select | Detection sensitivity for on-device wake word: "Slightly sensitive", "Moderately sensitive" (default), or "Very sensitive". Shared across both wake word slots |
 
@@ -77,7 +77,7 @@ The satellite entity exposes the following attributes for use in templates and a
 | `stop_word` | boolean | Whether opt-in stop word interruption is enabled |
 | `tts_target` | string | Entity ID of the selected TTS output media player (empty string when set to "Browser") |
 | `announcement_display_duration` | integer | Configured announcement display duration in seconds |
-| `wake_word_detection` | string | Current wake word detection mode: "On Device" or "Home Assistant" |
+| `wake_word_detection` | string | Current wake word detection mode: "On Device (microWakeWord)", "On Device (openWakeWord)", "Home Assistant", or "Disabled" |
 | `wake_word_model` | string | Wake word 1 model name (e.g., `ok_nabu`) |
 | `wake_word_model_2` | string | Wake word 2 model name, or `Disabled` when slot 2 is off |
 | `pipeline` | string | Pipeline 1 display name |

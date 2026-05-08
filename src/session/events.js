@@ -20,6 +20,10 @@ const WAKE_MODE_DISABLED = 'disabled';
 
 /**
  * Read the wake-word detection mode from the integration's select entity.
+ * Both `On Device (microWakeWord)` and `On Device (openWakeWord)` map
+ * to WAKE_MODE_LOCAL - the engine choice is consumed downstream by
+ * WakeWordManager via its own getEngine() helper.  The legacy `On Device`
+ * string also routes here for backwards compat.
  * @returns {'home-assistant'|'on-device'|'disabled'}
  */
 export function getWakeWordMode(session) {
@@ -27,8 +31,12 @@ export function getWakeWordMode(session) {
     session.hass, session.config.satellite_entity,
     'wake_word_detection', 'Home Assistant',
   );
-  if (raw === 'On Device') return WAKE_MODE_LOCAL;
   if (raw === 'Disabled') return WAKE_MODE_DISABLED;
+  if (raw === 'On Device'
+      || raw === 'On Device (microWakeWord)'
+      || raw === 'On Device (openWakeWord)') {
+    return WAKE_MODE_LOCAL;
+  }
   return WAKE_MODE_HA;
 }
 
@@ -38,7 +46,7 @@ export function getWakeWordMode(session) {
  * the chime module.  The integration writes this file in
  * `_write_sound_durations()` (__init__.py) after syncing any user-
  * supplied sound files, so the values reflect the *real* lengths of
- * whatever chimes are currently installed — including custom user
+ * whatever chimes are currently installed - including custom user
  * overrides.  Logs through the session logger so the lines only show
  * with debug enabled.  Called from startListening once the session has
  * been configured (logger.debug already reflects the user's setting).
@@ -76,7 +84,7 @@ function isConstrainedWebView() {
 
 async function settleBeforeWakeWordStart(session) {
   if (!isConstrainedWebView()) return;
-  session.logger.log('wake-word', 'Constrained WebView detected — delaying initial wake-word startup');
+  session.logger.log('wake-word', 'Constrained WebView detected - delaying initial wake-word startup');
   await new Promise((resolve) => setTimeout(resolve, 3000));
 }
 
@@ -113,7 +121,7 @@ export function setState(session, newState) {
   // the external-screensaver keep-alive loop so the tablet's native
   // screensaver can't cover the voice UI mid-conversation.  We keep
   // the keep-alive running while TTS audio is still playing even if
-  // the pipeline state has already transitioned away — otherwise the
+  // the pipeline state has already transitioned away - otherwise the
   // external screensaver can sneak back in before the response
   // finishes speaking.  onTTSComplete stops the loop once playback
   // actually ends.
@@ -130,7 +138,7 @@ export function setState(session, newState) {
   // fires locally *before* the server sends `stt-start`, giving us a ~200 ms
   // head start to re-acquire the mic with STT constraints so no audio is
   // dropped once STT actually begins recording.  On the way back out of STT
-  // (INTENT/TTS/IDLE/LISTENING), we swap back to wake-word mode — that
+  // (INTENT/TTS/IDLE/LISTENING), we swap back to wake-word mode - that
   // happens during server-side intent processing, not while the user is
   // speaking, so dropout there is free.
   //
@@ -195,11 +203,11 @@ export async function startListening(session) {
     // Disabled: don't acquire the mic and don't start the pipeline. The
     // session sits idle waiting for voice_satellite.wake to fire, which
     // starts the mic on demand and jumps straight to STT.  The full
-    // card's start-button overlay stays hidden — wake is driven by the
+    // card's start-button overlay stays hidden - wake is driven by the
     // service action (or dashboard buttons wired to it).  The mini card
     // still surfaces its small mic icon for IDLE state via _statusFor.
     if (mode === WAKE_MODE_DISABLED) {
-      session.logger.log('wake-word', 'Mode = Disabled — skipping mic and pipeline');
+      session.logger.log('wake-word', 'Mode = Disabled - skipping mic and pipeline');
       session._hasStarted = true;
       setState(session, State.IDLE);
       session.ui.hideStartButton();
@@ -243,7 +251,7 @@ export async function startListening(session) {
     } else {
       await session.pipeline.start();
       if (mode === WAKE_MODE_HA && stopWordOn) {
-        // Load runtime in standby. Failure here is non-fatal — stop-word
+        // Load runtime in standby. Failure here is non-fatal - stop-word
         // interruption simply won't be available, but server-side wake
         // detection and the rest of the pipeline still work.
         session._loadWakeWordModule()
@@ -259,7 +267,7 @@ export async function startListening(session) {
 
     // Pull the server-probed chime durations (custom user MP3s included)
     // now that the session is up and the logger reflects the user's
-    // debug preference — earlier in bootstrap the logger is still gated
+    // debug preference - earlier in bootstrap the logger is still gated
     // off, so the manifest-load line never reaches the console even
     // with debug on.
     fetchChimeDurations(session);
@@ -362,7 +370,7 @@ export async function startListening(session) {
  * path verbatim.
  *
  * Cancellation: any caller can stop a pending handoff by clearing
- * `session._followupDelayTimer` — wake-word detection and session
+ * `session._followupDelayTimer` - wake-word detection and session
  * teardown both do this.  The mic must be unmuted by the caller in
  * that case (wake-word/index.js handles it).
  *
@@ -489,7 +497,7 @@ export function onTTSComplete(session, playbackFailed) {
     // User is actively browsing images - don't auto-dismiss
     if (session.ui.isLightboxVisible()) return;
     // Resume any media playback we paused at wake-word time. Skipped above
-    // for the shouldContinue branch — that path stays paused for the next turn.
+    // for the shouldContinue branch - that path stays paused for the next turn.
     session.mediaPlayer.resumeAfterInterrupt();
     session.chat.clear();
     session.ui.hideBlurOverlay(BlurReason.PIPELINE);
@@ -626,7 +634,7 @@ export function handlePipelineMessage(session, message) {
  * @param {import('./index.js').VoiceSatelliteSession} session
  */
 export async function triggerWake(session) {
-  // Block if mid-interaction — the user is already in STT/INTENT/TTS
+  // Block if mid-interaction - the user is already in STT/INTENT/TTS
   // and another wake would just thrash state.
   const interacting = INTERACTING_STATES.includes(session.currentState);
   if (interacting) {
@@ -638,7 +646,7 @@ export async function triggerWake(session) {
     // Card hasn't started yet (no gesture, satellite_entity unset, etc.).
     // Defer: try start() first, which will pick the right path including
     // the disabled fast-path that skips mic acquisition.
-    session.logger.log('wake', 'Session not started — starting first');
+    session.logger.log('wake', 'Session not started - starting first');
     try { await session.start(); } catch (_) { /* fall through */ }
   }
 
@@ -648,14 +656,14 @@ export async function triggerWake(session) {
   try {
     if (mode === WAKE_MODE_LOCAL && session.wakeWord) {
       // Local detector is running.  Stop it, then start the server
-      // pipeline at STT — same shape as a real local detection.
+      // pipeline at STT - same shape as a real local detection.
       try { session.wakeWord.stop(); } catch (_) { /* ignore */ }
     } else if (mode === WAKE_MODE_HA) {
       // Server pipeline is currently waiting for a wake word.  Stop it
       // first so the next start() begins from STT instead of wake_word.
       await session.pipeline.stop();
     } else if (mode === WAKE_MODE_DISABLED) {
-      // Mic is intentionally off in disabled mode — bring it up now.
+      // Mic is intentionally off in disabled mode - bring it up now.
       if (!session.audio._mediaStream) {
         await session.audio.startMicrophone('stt');
       }
@@ -668,7 +676,7 @@ export async function triggerWake(session) {
     // restart's disabled branch re-shows it once the turn ends.
     session.ui.hideStartButton();
 
-    // Show the blur overlay — normally the HA wake_word-end handler or
+    // Show the blur overlay - normally the HA wake_word-end handler or
     // the local wake-word detection path raises this; manual wake skips
     // both so we have to do it explicitly.
     session.ui.showBlurOverlay(BlurReason.PIPELINE);
@@ -684,7 +692,7 @@ export async function triggerWake(session) {
   } catch (e) {
     session.logger.error('wake', `Manual wake failed: ${e?.message || e}`);
     setState(session, State.IDLE);
-    // Always re-expose the wake affordance so the user can retry — pass
+    // Always re-expose the wake affordance so the user can retry - pass
     // the not-allowed reason when relevant so the title prompt asks for
     // mic permission instead of just "tap to start".
     session.ui.showStartButton(e?.name === 'NotAllowedError' ? 'not-allowed' : undefined);

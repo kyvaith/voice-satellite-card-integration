@@ -12,15 +12,24 @@ import { getSwitchState, getSelectState } from '../shared/satellite-state.js';
 import { CHIME_WAKE, getChimeDuration } from '../audio/chime.js';
 import { loadTFLite, loadMicroModels, loadMicroModel, getMicroModelParams, releaseUnusedMicroModels, resetRuntime } from './micro-models.js';
 import { MicroWakeWordInference } from './micro-inference.js';
+import { OwwBackend } from './oww/backend.js';
+import { releaseUnusedOwwClassifiers } from './oww/models.js';
+import { WorkerProxyBackend } from './worker/proxy-backend.js';
 import { clearNotificationUI } from '../shared/satellite-notification.js';
 import { sendAck } from '../shared/notification-comms.js';
+
+// Detection-mode select values that need parsing in several places.
+// "On Device" (legacy) is treated as microWakeWord for backwards compat.
+const DETECTION_MODE_LEGACY_LOCAL = 'On Device';
+const DETECTION_MODE_LOCAL_MWW = 'On Device (microWakeWord)';
+const DETECTION_MODE_LOCAL_OWW = 'On Device (openWakeWord)';
 
 const CHUNK_SIZE = 1280; // 80ms @ 16kHz
 const MAX_POOL = 20;    // cap recycled frame pool (20 * 5KB = 100KB max)
 
 // Window between local wake word detection and the wake chime firing.
 // We keep the chime pending for this long so HA has a chance to send
-// duplicate_wake_up_detected first — if it does, we cancel the chime
+// duplicate_wake_up_detected first - if it does, we cancel the chime
 // and the losing tablet stays silent. Local HA round trip is typically
 // 25-100ms; 250ms gives a comfortable margin without making the chime
 // feel laggy on the winning tablet (the user was waiting for the chime
@@ -29,7 +38,7 @@ const MAX_POOL = 20;    // cap recycled frame pool (20 * 5KB = 100KB max)
 const WAKE_DEDUPE_WINDOW_MS = 250;
 
 // ─── Detection thresholds ────────────────────────────────────────────
-// microWakeWord models output confidence scores (0–1 via uint8/255).
+// microWakeWord models output confidence scores (0-1 via uint8/255).
 // Detection uses sliding window mean > cutoff. The base cutoff comes from
 // the model's companion JSON manifest (or hardcoded fallback in micro-models.js).
 // Sensitivity scales the detection margin (1 - baseCutoff):
@@ -87,6 +96,20 @@ export class WakeWordManager {
     this._stopMicroConfig = null;
     this._suspendedKeywords = null;
 
+    // Playback-suspend state (TTS / chime / notification audio).  When
+    // the speaker is producing output, wake-word inference must be
+    // halted - AEC scrubs most of it from the mic but enough residual
+    // bleeds through to score 0.8+ on the wake classifier.  Persists
+    // across pipeline.restart() cycles so the new backend created at
+    // tts-end starts suspended and can't self-trigger.
+    //
+    // Refcounted: each speaker source (TTS, each chime) calls suspend
+    // on start and resume on completion.  Overlapping sources (e.g.
+    // TTS + done chime, two chimes back-to-back) don't unsuspend
+    // prematurely.  Only flips state on the 0↔1 transition.
+    this._playbackSuspendCount = 0;
+    this._suspendedActiveBeforePlayback = null;
+
     // Settings change tracking
     this._cachedEnabled = undefined;
     this._cachedModel = undefined;
@@ -115,7 +138,9 @@ export class WakeWordManager {
 
   /**
    * Read the current wake word detection mode select.
-   * @returns {'On Device'|'Home Assistant'|'Disabled'}
+   * @returns {string} One of 'Home Assistant', 'Disabled', the new
+   *   'On Device (microWakeWord)' / 'On Device (openWakeWord)', or the
+   *   legacy 'On Device' (treated as microWakeWord throughout).
    */
   _wakeMode() {
     return getSelectState(
@@ -127,12 +152,24 @@ export class WakeWordManager {
   }
 
   /**
+   * Resolve the wake-word engine.  Returns null for HA / Disabled so
+   * callers can early-out without engine-specific logic.
+   * @returns {'mww'|'oww'|null}
+   */
+  getEngine() {
+    const mode = this._wakeMode();
+    if (mode === DETECTION_MODE_LOCAL_OWW) return 'oww';
+    if (mode === DETECTION_MODE_LOCAL_MWW || mode === DETECTION_MODE_LEGACY_LOCAL) return 'mww';
+    return null;
+  }
+
+  /**
    * True when on-device wake word inference is the primary listening mode.
    * Wake-word models load and run continuously in this mode.
    * @returns {boolean}
    */
   isOnDeviceWakeEnabled() {
-    return this._wakeMode() === 'On Device';
+    return this.getEngine() !== null;
   }
 
   /**
@@ -151,7 +188,7 @@ export class WakeWordManager {
    * @returns {boolean}
    */
   needsLocalInference() {
-    if (this._wakeMode() === 'On Device') return true;
+    if (this.isOnDeviceWakeEnabled()) return true;
     return this.isStopWordEnabled();
   }
 
@@ -273,8 +310,18 @@ export class WakeWordManager {
    */
   getThresholdForModel(modelName) {
     const label = this._getSensitivityLabel();
-    const params = getMicroModelParams(modelName);
-    const baseCutoff = params.cutoff ?? DEFAULT_CUTOFF;
+    // openWakeWord classifiers ship with calibrated sigmoid outputs;
+    // the upstream library uses 0.5 as the canonical cutoff and exposes
+    // sensitivity by tuning that.  microWakeWord cutoffs are per-model
+    // and typically much higher (0.85-0.97) since the streaming
+    // sliding-window mean naturally smooths out noise.
+    const baseCutoff = this.getEngine() === 'oww'
+      // OWW wake-word classifiers fire reliably with the upstream-default 0.5
+      // cutoff.  The community OWW stop classifier produces noisier output
+      // and FPs on low-amplitude speech at 0.5; bumped to 0.65 for stop only
+      // so a sustained ~0.65+ smoothed mean is required to fire.
+      ? (modelName === 'stop' ? 0.65 : 0.5)
+      : (getMicroModelParams(modelName).cutoff ?? DEFAULT_CUTOFF);
     const table = modelName === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
     const factor = table[label] ?? 1.0;
     const effective = 1 - (1 - baseCutoff) * factor;
@@ -331,61 +378,92 @@ export class WakeWordManager {
   async start() {
     if (this._active || this._resetting) return;
     if (!this.needsLocalInference()) {
-      this._log.log('wake-word', 'Local inference not needed — skipping start');
+      this._log.log('wake-word', 'Local inference not needed - skipping start');
       return;
     }
 
     const onDevice = this.isOnDeviceWakeEnabled();
+    const engine = this.getEngine();  // 'mww' | 'oww' | null
     const wakeModels = onDevice ? this.getActiveModels() : [];
-    const modelsKey = wakeModels.slice().sort().join(',');
+    // The cache key is engine-prefixed so flipping engines without
+    // changing the model name (e.g. picking ok_nabu in OWW after MWW)
+    // still triggers a full reload.
+    const modelsKey = `${engine || 'standby'}:${wakeModels.slice().sort().join(',')}`;
     this._log.log(
       'wake-word',
       onDevice
-        ? `Starting on-device detection (models: ${wakeModels.join(', ')})`
+        ? `Starting on-device detection (engine: ${engine}, models: ${wakeModels.join(', ')})`
         : 'Starting stop-word standby (HA wake mode + stop-word on)',
     );
 
     try {
-      if (!this._tfweb) {
-        this._log.log('wake-word', 'Initializing wake-word runtime...');
-        this._tfweb = await loadTFLite();
-        const backend = this._tfweb?.backend ? ` (${this._tfweb.backend})` : '';
-        this._log.log('wake-word', `Wake-word runtime ready${backend}`);
-      }
-
       if (!this._inference || this._loadedModelsKey !== modelsKey) {
-        // Only treat "tfweb exists but inference is gone" as stale state
-        // if we had previously completed a model load in this manager.
-        // On a normal cold start _tfweb is created first and _inference
-        // is still null, so resetting here would churn the TFLite loader
-        // and increase startup pressure for no benefit.
-        if (this._tfweb && !this._inference && this._loadedModelsKey !== null) {
-          await this._recreateRuntime('stale runtime before model reload');
-        }
-        // Release models no longer needed before loading new ones.
-        await releaseUnusedMicroModels(wakeModels);
+        // Different engine/models than last time - destroy the old
+        // worker before spawning a new one so we don't leak the worker
+        // process or its compiled-model memory.
+        if (this._inference) this._destroyInference('engine/model change');
 
-        let keywordConfigs = [];
-        if (wakeModels.length > 0) {
-          this._log.log('wake-word', 'Loading wake word models...');
-          const runners = await loadMicroModels(
-            this._tfweb,
-            wakeModels,
-            (name) => this._log.log('wake-word', `Loading model: ${name}`),
+        if (engine === 'oww') {
+          // openWakeWord path: shared mel + embedding load inside the
+          // worker, plus one classifier per wake word.  When stop-word
+          // is enabled we *load* the stop classifier alongside (it
+          // shares the mel+embedding pipeline) but mark it INACTIVE -
+          // matches MWW's behavior where the stop runner only runs
+          // inference during interruptible states.  enableStopModel()
+          // / disableStopModel() flip the active flag without paying
+          // model-load cost.
+          const stopEnabled = this.isStopWordEnabled();
+          const allClassifiers = stopEnabled ? [...wakeModels, 'stop'] : wakeModels;
+          const cutoffs = {};
+          for (const name of allClassifiers) cutoffs[name] = this.getThresholdForModel(name);
+          this._log.log('wake-word', `Spawning OWW worker for: ${allClassifiers.join(', ')}`);
+          this._inference = await WorkerProxyBackend.create({
+            engine: 'oww',
+            models: allClassifiers,
+            // Only wake words are active at start.  Stop is loaded but
+            // dormant until enableStopModel() flips it on.
+            activeKeywords: wakeModels,
+            cutoffs,
+            energyGateEnabled: this._isNoiseGateEnabled(),
+            sensitivityLabel: this._getSensitivityLabel(),
+            log: this._log,
+          });
+          // Track stop classifier presence so enableStopModel() knows
+          // it's already loaded (OWW classifiers are baked in at create).
+          if (stopEnabled) {
+            this._stopMicroConfig = {
+              name: 'stop',
+              cutoff: this.getThresholdForModel('stop'),
+            };
+          }
+          this._loadedModelsKey = modelsKey;
+          this._log.log(
+            'wake-word',
+            `OWW worker ready - active: ${wakeModels.join(', ')}${stopEnabled ? ' (stop loaded, inactive)' : ''}`,
           );
-          keywordConfigs = this._buildKeywordConfigs(runners);
-        }
-
-        this._inference = await MicroWakeWordInference.create(
-          keywordConfigs, this._log, this._getSensitivityLabel(), this._isNoiseGateEnabled(),
-        );
-        this._loadedModelsKey = modelsKey;
-
-        if (keywordConfigs.length > 0) {
-          const configSummary = keywordConfigs.map((k) => `${k.name}(c=${k.cutoff},sw=${k.slidingWindow})`).join(', ');
-          this._log.log('wake-word', `Wake word models loaded: ${configSummary}`);
         } else {
-          this._log.log('wake-word', 'Inference engine ready (no wake models loaded — stop-word standby)');
+          // microWakeWord path (also covers stop-word-only standby).
+          // The Worker loads its own TFLite runtime + models; we don't
+          // touch them on the main thread.
+          const cutoffs = {};
+          for (const name of wakeModels) cutoffs[name] = this.getThresholdForModel(name);
+          this._log.log('wake-word', `Spawning MWW worker for: ${wakeModels.join(', ') || '(stop standby only)'}`);
+          this._inference = await WorkerProxyBackend.create({
+            engine: 'mww',
+            models: wakeModels,
+            cutoffs,
+            energyGateEnabled: this._isNoiseGateEnabled(),
+            sensitivityLabel: this._getSensitivityLabel(),
+            log: this._log,
+          });
+          this._loadedModelsKey = modelsKey;
+
+          if (wakeModels.length > 0) {
+            const configSummary = wakeModels.map((n) => `${n}(c=${cutoffs[n].toFixed(2)})`).join(', ');
+            this._log.log('wake-word', `MWW worker ready: ${configSummary}`);
+          } else {
+            this._log.log('wake-word', 'MWW worker ready (no wake models loaded - stop-word standby)');
+          }
         }
       } else if (wakeModels.length > 0) {
         this._inference.updateThresholds(
@@ -400,6 +478,14 @@ export class WakeWordManager {
       this._processing = false;
       if (onDevice) {
         this._active = true;
+        // pipeline.restart() at tts-end fires while TTS audio is still
+        // playing.  If we land here mid-playback, re-apply the suspend
+        // so the new backend doesn't process speaker-residual audio.
+        if (this._playbackSuspendCount > 0) {
+          this._suspendedActiveBeforePlayback = true;
+          this._active = false;
+          this._log.log('wake-word', 'Started in playback-suspended state');
+        }
         this._session.setState(State.LISTENING);
         this._log.log('wake-word', 'On-device wake word detection active');
       } else {
@@ -414,6 +500,11 @@ export class WakeWordManager {
     } catch (e) {
       const msg = e?.message || String(e);
       const isOOM = msg.includes('Out of memory');
+      // openWakeWord requires WebGPU.  If the worker reports the
+      // device couldn't be acquired, give the user a specific actionable
+      // toast instead of the generic "could not start" copy.
+      const isNoWebGpu = e?.code === 'webgpu-unavailable'
+        || msg.includes('WebGPU');
       if (isOOM) {
         this._log.error('wake-word', 'Wake-word runtime OOM - forcing full runtime reset');
         try {
@@ -423,13 +514,19 @@ export class WakeWordManager {
       this._log.error('wake-word', `Failed to start: ${msg}`);
       // Surface to the user. Dedup id is stable across retries so a
       // runtime reset loop doesn't flood the toast surface.
+      let description;
+      if (isOOM) {
+        description = 'On-device detection ran out of memory. The runtime is restarting; detection may be briefly unavailable.';
+      } else if (isNoWebGpu) {
+        description = 'openWakeWord requires WebGPU, which this device does not support. Switch the wake word engine to "On Device (microWakeWord)" instead - it works on every device without needing a GPU.';
+      } else {
+        description = 'On-device wake word detection could not start. Try a different model or switch to Home Assistant wake word detection.';
+      }
       this._session.toast?.show({
         id: 'wake-word.load-failed',
         severity: 'error',
         category: 'Wake word',
-        description: isOOM
-          ? 'On-device detection ran out of memory. The runtime is restarting; detection may be briefly unavailable.'
-          : 'On-device wake word detection could not start. Try a different model or switch to Home Assistant wake word detection.',
+        description,
         action: { label: 'Open Diagnostics', type: 'diagnostics' },
       });
       throw e;
@@ -476,7 +573,7 @@ export class WakeWordManager {
    * Synchronous so it runs to completion inside a `pagehide` handler.
    */
   release() {
-    this._log.log('wake-word', 'release() — freeing wake-word runtime');
+    this._log.log('wake-word', 'release() - freeing wake-word runtime');
     try { this.stop(); } catch (e) { this._log.log('wake-word', `release: stop failed: ${e.message || e}`); }
     this._destroyInference('release');
     this._loadedModelsKey = null;
@@ -499,7 +596,7 @@ export class WakeWordManager {
   feedAudio(chunk) {
     if ((!this._active && !this._stopOnlyMode) || !this._inference) return;
 
-    // Grow pre-allocated buffer if needed (rare — only if chunk is unusually large)
+    // Grow pre-allocated buffer if needed (rare - only if chunk is unusually large)
     const needed = this._sampleBufLen + chunk.length;
     if (needed > this._sampleBuf.length) {
       const newBuf = new Float32Array(needed * 2);
@@ -512,7 +609,7 @@ export class WakeWordManager {
     this._sampleBufLen += chunk.length;
 
     // Queue complete chunks for serial processing.
-    // Cap queue depth — if inference can't keep up, drop oldest frames rather
+    // Cap queue depth - if inference can't keep up, drop oldest frames rather
     // than letting memory grow unbounded.  50 frames ≈ 4s of audio at 80ms each.
     const MAX_QUEUE = 50;
     while (this._sampleBufLen >= CHUNK_SIZE) {
@@ -568,7 +665,7 @@ export class WakeWordManager {
   }
 
   /**
-   * Handle wake word detection — mirrors pipeline handleWakeWordEnd behavior.
+   * Handle wake word detection - mirrors pipeline handleWakeWordEnd behavior.
    * @param {string} modelName - the model that triggered detection
    */
   async _onDetection(modelName) {
@@ -582,9 +679,9 @@ export class WakeWordManager {
     // events aren't dropped. The wake word worklet keeps running while
     // paused, but handlePipelineMessage blocks all events when isPaused.
     if (session.visibility.isPaused) {
-      this._log.log('wake-word', 'Unpausing — detection while tab paused');
+      this._log.log('wake-word', 'Unpausing - detection while tab paused');
 
-      // Signal visibility manager that we own the resume — prevents the
+      // Signal visibility manager that we own the resume - prevents the
       // visibilitychange → _resume() path from racing with us (both would
       // resume AudioContext + restart pipeline concurrently).
       session.visibility._wakeWordResuming = true;
@@ -601,7 +698,7 @@ export class WakeWordManager {
 
     // If muted, silently ignore the detection and resume listening
     if (getSwitchState(session.hass, session.config.satellite_entity, 'mute') === true) {
-      this._log.log('wake-word', 'Muted — ignoring wake word detection');
+      this._log.log('wake-word', 'Muted - ignoring wake word detection');
       this._active = true;
       return;
     }
@@ -617,7 +714,7 @@ export class WakeWordManager {
 
     // Cancel a pending follow-up listen delay (user wake-worded over a
     // continue-conversation pause).  Drop the mute the timer set, then
-    // fall through to the normal wake flow — the muting below will
+    // fall through to the normal wake flow - the muting below will
     // re-apply for the wake chime path.
     if (session._followupDelayTimer) {
       this._log.log('wake-word', 'Cancelling pending follow-up delay - wake word fired during handoff');
@@ -672,7 +769,7 @@ export class WakeWordManager {
     // which the mic-analyser updates each frame.  Once we mute the tracks
     // the analyser reads silence, the CSS var stays ~0, and the bar
     // renders as a frozen flat rainbow until the chime finishes and we
-    // unmute — that's the "stagger" the user sees between wake word and
+    // unmute - that's the "stagger" the user sees between wake word and
     // chime.  Just calling stopReactive() here doesn't work: the
     // subsequent state transitions WAKE_WORD_DETECTED → STT both re-run
     // updateForState() which would turn reactive right back on.  A
@@ -680,7 +777,7 @@ export class WakeWordManager {
     // once the mic is actually unmuted below.
     session.ui.setReactiveSuppressed(true);
 
-    // Kick off the pipeline immediately. We do NOT await — the chime
+    // Kick off the pipeline immediately. We do NOT await - the chime
     // and STT timing are independent of pipeline.start's resolution,
     // and we need HA to receive the wake_word_detected event right
     // away so it can decide if this tablet won the dedupe race.
@@ -721,7 +818,7 @@ export class WakeWordManager {
         audio.stopSending();
         // Mic is still muted at this point so the chime won't bleed
         // into the STT recording. Unmute after the chime + a small
-        // settle window — same total duration the old in-line code used.
+        // settle window - same total duration the old in-line code used.
         session.tts.playChime('wake');
         // Speaker output buffers + echo-cancellation adapt time mean the
         // chime is still physically emerging from the speakers for a
@@ -746,7 +843,7 @@ export class WakeWordManager {
           if (session.pipeline.binaryHandlerId) {
             audio.startSending(() => session.pipeline.binaryHandlerId);
           }
-          // Mic is live again — let updateForState() re-enable reactive on
+          // Mic is live again - let updateForState() re-enable reactive on
           // the next state change, and flip it on right now for the current
           // state since we're already mid-interaction.
           session.ui.setReactiveSuppressed(false);
@@ -777,7 +874,7 @@ export class WakeWordManager {
         // Mirror the wake-sound-on path: once the mic is live again, kick
         // the reactive bar over to mic-driven rendering.  Without this,
         // setReactiveSuppressed(false) alone just cancels the synthetic
-        // pulse — the analyser tick loop stays stopped because
+        // pulse - the analyser tick loop stays stopped because
         // updateForState() already ran (during suppression) and won't
         // re-fire until the next state change, leaving the bar dark
         // even as the user speaks.
@@ -807,7 +904,7 @@ export class WakeWordManager {
 
   /**
    * Cancel any timers scheduled by _onDetection without touching the
-   * mic mute state. Internal helper — callers usually want
+   * mic mute state. Internal helper - callers usually want
    * cancelPendingChime() which also handles the unmute.
    */
   _cancelPendingChimeInternal() {
@@ -824,7 +921,7 @@ export class WakeWordManager {
   /**
    * Cancel a pending wake chime if one is scheduled (i.e. we're inside
    * the dedupe window after a local detection but the chime hasn't
-   * fired yet). Returns true if something was cancelled — the caller
+   * fired yet). Returns true if something was cancelled - the caller
    * (the pipeline error handler) uses this to short-circuit the normal
    * "expected error" cleanup so the losing tablet stays completely
    * silent.
@@ -889,7 +986,7 @@ export class WakeWordManager {
     }
 
     if (!this._inference) {
-      this._log.log('stop-word', 'Cannot enable — inference not initialized');
+      this._log.log('stop-word', 'Cannot enable - inference not initialized');
       return;
     }
 
@@ -897,7 +994,7 @@ export class WakeWordManager {
     // stop-word on), there are no wake-word models loaded for stop to
     // run "alongside", and _active stays false. Callers like media
     // playback and timer alerts pass stopOnly=false intending to keep
-    // wake words active — but with none loaded, that branch leaves the
+    // wake words active - but with none loaded, that branch leaves the
     // audio gate (_active || _stopOnlyMode) closed and stop never fires.
     // Coerce to stopOnly so _stopOnlyMode flips on and audio flows.
     if (!stopOnly && !this.isOnDeviceWakeEnabled()) {
@@ -905,9 +1002,21 @@ export class WakeWordManager {
     }
 
     try {
-      if (!this._tfweb) return;
+      const isOww = this.getEngine() === 'oww';
+      // MWW path needs the TFLite runtime loaded; OWW path uses its own
+      // pre-compiled classifier from the constructor in start().
+      if (!isOww && !this._tfweb) return;
 
       if (!this._stopMicroConfig) {
+        if (isOww) {
+          // Should already be set by start() when stop-word is enabled,
+          // but if a caller flipped stop on after start ran, we'd land
+          // here.  The OWW classifier is baked into the OwwInference at
+          // construction, so we'd need a full restart to add it; bail
+          // out and let the next checkSettingsChanged cycle restart.
+          this._log.log('stop-word', 'OWW stop classifier not loaded - restart pending');
+          return;
+        }
         this._log.log('stop-word', 'Loading stop model...');
         const runner = await loadMicroModel(this._tfweb, 'stop');
         const params = getMicroModelParams('stop');
@@ -994,7 +1103,7 @@ export class WakeWordManager {
       // Only resume continuous inference if on-device wake is the active
       // listening mode. In HA + stop standby, returning to _active = true
       // would start running the empty inference engine on every audio
-      // frame for no reason — defeats the whole "zero local cost when not
+      // frame for no reason - defeats the whole "zero local cost when not
       // interrupting" promise.
       this._active = this.isOnDeviceWakeEnabled();
       this._sampleBufLen = 0;
@@ -1014,7 +1123,61 @@ export class WakeWordManager {
   }
 
   /**
-   * Handle stop word detection — cancel the current interruptible state.
+   * Halt wake-word inference for the duration of speaker playback (TTS,
+   * chimes, notification audio).  Without this, the device's own speaker
+   * output bleeds through AEC enough to self-trigger the wake classifier
+   * (rms<0.005 mic input scoring 0.8+ on ok_nabu, fires immediately).
+   *
+   * Called synchronously from tts.play() before audio loading begins, so
+   * the suspend is in place before pipeline.restart(0) at tts-end spins
+   * up a fresh OWW backend - start() then re-applies the suspend so the
+   * new backend doesn't process audio either.
+   *
+   * Stop-word interruption (when enabled) is handled by the existing
+   * enableStopModel(true) path on a separate 250 ms timer; it sets
+   * _stopOnlyMode and routes audio to the stop classifier only.
+   */
+  suspendForPlayback() {
+    this._playbackSuspendCount++;
+    if (this._playbackSuspendCount > 1) return; // already suspended by another source
+    this._suspendedActiveBeforePlayback = this._active;
+    if (this._active) {
+      this._active = false;
+      this._sampleBufLen = 0;
+      this._frameQueue.length = 0;
+      this._processing = false;
+      if (this._inference?.reset) this._inference.reset();
+    }
+    this._log.log('wake-word', 'Suspended for playback');
+  }
+
+  /**
+   * Resume wake-word inference after speaker playback ends.  No-op if
+   * stop-only mode took over during playback - disableStopModel handles
+   * that path on its own and restores _active correctly.  Refcounted -
+   * only takes effect on the 1→0 transition so overlapping sources
+   * (TTS + chime, two chimes) don't unsuspend mid-playback.
+   */
+  resumeFromPlayback() {
+    if (this._playbackSuspendCount === 0) return; // unbalanced resume - ignore
+    this._playbackSuspendCount--;
+    if (this._playbackSuspendCount > 0) return; // still suspended by another source
+    if (this._stopOnlyMode) {
+      // disableStopModel will set _active based on isOnDeviceWakeEnabled.
+      this._suspendedActiveBeforePlayback = null;
+      return;
+    }
+    this._active = !!this._suspendedActiveBeforePlayback;
+    this._suspendedActiveBeforePlayback = null;
+    this._sampleBufLen = 0;
+    this._frameQueue.length = 0;
+    this._processing = false;
+    if (this._inference?.reset) this._inference.reset();
+    this._log.log('wake-word', 'Resumed after playback');
+  }
+
+  /**
+   * Handle stop word detection - cancel the current interruptible state.
    * Priority chain matches DoubleTapHandler._cancel().
    */
   async _onStopDetection() {
@@ -1024,7 +1187,7 @@ export class WakeWordManager {
     // Disable stop model first
     this.disableStopModel();
 
-    // 1. Timer alert — highest priority
+    // 1. Timer alert - highest priority
     if (session.timer.alertActive) {
       this._log.log('stop-word', 'Dismissing timer alert');
       session.timer.dismissAlert();
@@ -1034,7 +1197,7 @@ export class WakeWordManager {
       return;
     }
 
-    // 2a. Show is active (its own dismiss flow — uses PIPELINE blur and the
+    // 2a. Show is active (its own dismiss flow - uses PIPELINE blur and the
     //     pipeline-driven assistant bubble, not announcement-style UI).
     if (session.show?.active) {
       this._log.log('stop-word', 'Dismissing show');
@@ -1111,7 +1274,7 @@ export class WakeWordManager {
       return;
     }
 
-    // 4. Media playback — fallback when nothing else is active.
+    // 4. Media playback - fallback when nothing else is active.
     if (session.mediaPlayer.isPlaying) {
       this._log.log('stop-word', 'Stopping media playback');
       session.mediaPlayer.stop();
@@ -1161,6 +1324,7 @@ export class WakeWordManager {
     if (!this._session._hasStarted || this._switching) return;
 
     const enabled = this.isEnabled();
+    const engine = this.getEngine();
     const model = this.getModelName();
     const model2 = this.getModel2Name();
     const threshold = this.getThreshold();
@@ -1170,6 +1334,7 @@ export class WakeWordManager {
     // Initialize cache on first call
     if (this._cachedEnabled === undefined) {
       this._cachedEnabled = enabled;
+      this._cachedEngine = engine;
       this._cachedModel = model;
       this._cachedModel2 = model2;
       this._cachedThreshold = threshold;
@@ -1179,15 +1344,19 @@ export class WakeWordManager {
     }
 
     const enabledChanged = enabled !== this._cachedEnabled;
+    // Engine flip (MWW ↔ OWW) without changing the enabled bit needs a
+    // full inference rebuild - same code path as a model change.
+    const engineChanged = engine !== this._cachedEngine;
     const modelChanged = model !== this._cachedModel;
     const model2Changed = model2 !== this._cachedModel2;
     const thresholdChanged = threshold !== this._cachedThreshold;
     const noiseGateChanged = noiseGate !== this._cachedNoiseGate;
     const stopWordChanged = stopWord !== this._cachedStopWord;
 
-    if (!enabledChanged && !modelChanged && !model2Changed && !thresholdChanged && !noiseGateChanged && !stopWordChanged) return;
+    if (!enabledChanged && !engineChanged && !modelChanged && !model2Changed && !thresholdChanged && !noiseGateChanged && !stopWordChanged) return;
 
     // Always update caches
+    this._cachedEngine = engine;
     this._cachedModel2 = model2;
     this._cachedThreshold = threshold;
     this._cachedNoiseGate = noiseGate;
@@ -1219,7 +1388,7 @@ export class WakeWordManager {
       // the local runtime existed. Tear it down so the user pays zero
       // local CPU/RAM cost again, matching the performance contract.
       if (!this.isOnDeviceWakeEnabled()) {
-        this._log.log('wake-word', 'Stop-word off without on-device wake — releasing local runtime');
+        this._log.log('wake-word', 'Stop-word off without on-device wake - releasing local runtime');
         this.stop();
         this._destroyInference('stop-word disabled');
         this._loadedModelsKey = null;
@@ -1234,16 +1403,18 @@ export class WakeWordManager {
       // runtime in standby so subsequent enableStopModel(true) calls
       // (during TTS, notifications, alerts) have an inference engine to
       // attach to.
-      this._log.log('wake-word', 'Stop-word on without on-device wake — loading runtime to standby');
+      this._log.log('wake-word', 'Stop-word on without on-device wake - loading runtime to standby');
       this.start().catch((e) => {
         this._log.error('wake-word', `Standby start failed: ${e.message || e}`);
       });
     }
 
-    // Mode or model change requires switching (slot 2 changes are
-    // treated as a model change since the active-models set shifts).
-    if (enabledChanged || modelChanged || model2Changed) {
-      this._applyModeOrModelChange(enabled, model, enabledChanged);
+    // Mode, engine, or model change requires switching.  Slot-2 swaps
+    // count as a model change since the active-models set shifts; engine
+    // flips force a full inference rebuild because MWW and OWW share no
+    // runtime state.
+    if (enabledChanged || engineChanged || modelChanged || model2Changed) {
+      this._applyModeOrModelChange(enabled, model, enabledChanged || engineChanged);
     }
   }
 
@@ -1255,7 +1426,7 @@ export class WakeWordManager {
 
     // Only switch while waiting for wake word, not mid-interaction.
     if (![State.LISTENING, State.IDLE, State.PAUSED].includes(session.currentState)) {
-      this._log.log('wake-word', 'Settings changed during interaction — will apply on next cycle');
+      this._log.log('wake-word', 'Settings changed during interaction - will apply on next cycle');
       return;
     }
 
@@ -1263,7 +1434,7 @@ export class WakeWordManager {
     try {
       if (enabledChanged) {
         if (enabled) {
-          this._log.log('wake-word', 'Mode → On Device');
+          this._log.log('wake-word', `Mode → on-device (${this.getEngine()})`);
           session.pipeline.stop();
           if (session.currentState !== State.PAUSED) {
             await this.start();
@@ -1278,8 +1449,8 @@ export class WakeWordManager {
           this._log.log(
             'wake-word',
             disabled
-              ? 'Mode → Disabled — releasing models and stopping mic'
-              : 'Mode → Home Assistant — releasing models',
+              ? 'Mode → Disabled - releasing models and stopping mic'
+              : 'Mode → Home Assistant - releasing models',
           );
           this.stop();
           this._destroyInference('mode-switch');

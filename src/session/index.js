@@ -164,7 +164,7 @@ export class VoiceSatelliteSession {
     return this._connection;
   }
 
-  /** Session is always the "owner" — there's no ownership model. */
+  /** Session is always the "owner" - there's no ownership model. */
   get isOwner() { return true; }
 
   /** True if any registered card wants the reactive bar. */
@@ -205,7 +205,7 @@ export class VoiceSatelliteSession {
     if (this._rejectedPreviews.has(card)) return;
     if (isEditorPreview(card)) return;
 
-    // Only one full card should be registered at a time — its UI lives
+    // Only one full card should be registered at a time - its UI lives
     // in document.body and persists across navigations. Evict any stale
     // instance that was disconnected during navigation or replaced by
     // the editor.
@@ -275,7 +275,7 @@ export class VoiceSatelliteSession {
     // through unregister().  Log a trace if this happens so we can
     // diagnose the unexpected caller.
     if (card.cardType === 'full') {
-      this._logger.log('session', 'WARNING: full card being unregistered — trace:');
+      this._logger.log('session', 'WARNING: full card being unregistered - trace:');
       console.trace('full card unregister');
     }
     this._cards.delete(card);
@@ -326,7 +326,7 @@ export class VoiceSatelliteSession {
     // Panel config keys the session cares about.  Changes to any `micKeys`
     // entry trigger a mic restart so constraint updates take effect live.
     const micKeys = [
-      // Legacy shared keys — kept for backwards-compat with saved dashboards
+      // Legacy shared keys - kept for backwards-compat with saved dashboards
       // from before the wake-word / STT split.
       'echo_cancellation', 'noise_suppression', 'auto_gain_control', 'voice_isolation',
       // Wake-word-specific DSP
@@ -372,7 +372,7 @@ export class VoiceSatelliteSession {
 
     // Restart mic if audio constraints changed while running
     if (micChanged && this._hasStarted && this._audio._mediaStream) {
-      this._logger.log('session', 'Mic constraints changed — restarting mic');
+      this._logger.log('session', 'Mic constraints changed - restarting mic');
       this._audio.stopMicrophone();
       this._audio.startMicrophone().catch((e) => {
         this._logger.error('session', `Mic restart failed: ${e.message || e}`);
@@ -477,10 +477,14 @@ export class VoiceSatelliteSession {
    * @returns {boolean}
    */
   _isWakeWordEnabled() {
-    return getSelectState(
+    const raw = getSelectState(
       this._hass, this._config.satellite_entity,
-      'wake_word_detection', 'On Device',
-    ) === 'On Device';
+      'wake_word_detection', 'On Device (microWakeWord)',
+    );
+    // Accept the legacy bare label and both engine-specific variants.
+    return raw === 'On Device'
+      || raw === 'On Device (microWakeWord)'
+      || raw === 'On Device (openWakeWord)';
   }
 
   /**
@@ -504,7 +508,7 @@ export class VoiceSatelliteSession {
     if (!this._isDetectionDisabled()) return;
     if (![State.LISTENING, State.IDLE].includes(this._state)) return;
     if (!this._pipeline.binaryHandlerId && !this._audio._mediaStream) return;
-    this._logger.log('wake-word', 'Mode changed to Disabled — stopping pipeline and mic');
+    this._logger.log('wake-word', 'Mode changed to Disabled - stopping pipeline and mic');
     try { this._pipeline.stop(); } catch (_) { /* ignore */ }
     try { this._audio.stopMicrophone(); } catch (_) { /* ignore */ }
     this.setState(State.IDLE);
@@ -512,7 +516,7 @@ export class VoiceSatelliteSession {
 
   /**
    * Dynamically load the wake word module and create the manager.
-   * Cached — only loads the chunk once.
+   * Cached - only loads the chunk once.
    * @returns {Promise<import('../wake-word').WakeWordManager>}
    */
   async _loadWakeWordModule() {
@@ -547,20 +551,20 @@ export class VoiceSatelliteSession {
       await this._loadWakeWordModule();
       if (onDevice && [State.LISTENING, State.IDLE].includes(this._state)) {
         // If in listening/idle state, switch from HA pipeline to on-device.
-        // Coming from disabled mode the mic is off — bring it up first.
-        this._logger.log('wake-word', 'Mode changed to On Device — loading');
+        // Coming from disabled mode the mic is off - bring it up first.
+        this._logger.log('wake-word', 'Mode changed to On Device - loading');
         this._pipeline.stop();
         if (!this._audio._mediaStream) {
           await this._audio.startMicrophone('wake_word');
         }
         await this._wakeWord.start();
       } else if (standbyNeeded) {
-        // HA / Disabled wake mode, stop-word just enabled — bring up the
+        // HA / Disabled wake mode, stop-word just enabled - bring up the
         // local inference runtime in standby. In HA mode the pipeline is
         // already running for server-side wake detection; in Disabled
         // mode the mic is off and the runtime simply waits for TTS to
         // call enableStopModel(true) during the next wake-triggered turn.
-        this._logger.log('wake-word', 'Stop-word on without on-device wake — standby start');
+        this._logger.log('wake-word', 'Stop-word on without on-device wake - standby start');
         await this._wakeWord.start();
       }
     } catch (e) {
@@ -591,7 +595,7 @@ export class VoiceSatelliteSession {
     // Timer pills live in a separate container outside #voice-satellite-ui
     const timers = document.getElementById('voice-satellite-timers');
     if (timers) timers.style.display = display;
-    // Timer alerts are created dynamically in document.body — clean up any visible ones
+    // Timer alerts are created dynamically in document.body - clean up any visible ones
     if (suppress) {
       for (const el of document.querySelectorAll('.vs-timer-alert')) {
         el.style.display = 'none';

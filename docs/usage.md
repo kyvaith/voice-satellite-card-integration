@@ -123,7 +123,7 @@ The engine provides audio and visual feedback: a done chime on successful match,
 
 ## Voice Satellite Wake Action
 
-Trigger the satellite as if a wake word were detected. Skips wake-word listening and goes directly to STT. Works regardless of the configured wake-word detection mode (On Device, Home Assistant, or Disabled), and is the primary way to drive interactions in [Disabled mode](wake-word.md#disabled-mode).
+Trigger the satellite as if a wake word were detected. Skips wake-word listening and goes directly to STT. Works regardless of the configured wake-word detection mode (On Device microWakeWord, On Device openWakeWord, Home Assistant, or Disabled), and is the primary way to drive interactions in [Disabled mode](wake-word.md#disabled-mode).
 
 ```yaml
 action: voice_satellite.wake

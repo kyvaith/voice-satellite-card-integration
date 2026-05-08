@@ -4,6 +4,12 @@ import { playChime, CHIME_ALERT } from '../audio/chime.js';
 
 let _chimeInterval = null;
 let _dismissTimeout = null;
+// Screensaver keepalive: while the alert is on screen we ping the
+// in-app idle timer (notifyActivity) AND Fully Kiosk's native screensaver
+// every 4 s so neither covers the alert UI before the user sees it.
+// Same cadence the media-player overlays use for video/image playback.
+let _screensaverKeepaliveTimer = null;
+const SCREENSAVER_KEEPALIVE_MS = 4000;
 import { BlurReason, Timing } from '../constants.js';
 
 /** @param {import('./index.js').TimerManager} mgr */
@@ -71,6 +77,13 @@ export function showAlert(mgr, names) {
   mgr.alertActive = true;
   mgr.log.log('timer', `Showing finished alert${names?.length ? `: ${names.join(', ')}` : ''}`);
 
+  // Dismiss the in-app screensaver and keep both it and Fully Kiosk's
+  // native one suppressed for the duration of the alert.  Otherwise the
+  // chime fires unattended behind whichever screensaver re-activates on
+  // its idle timeout (in-app default is 10 s - well under the alert's
+  // 60 s auto-dismiss).  Mirrors the media-player video/image keepalive.
+  startScreensaverKeepalive(mgr);
+
   const wakeWord = mgr.card.wakeWord;
   if (wakeWord?.active && wakeWord._inference) {
     wakeWord.enableStopModel(false);
@@ -99,8 +112,9 @@ export function clearAlert(mgr) {
   if (!mgr.alertActive) return;
   mgr.alertActive = false;
 
+  stopScreensaverKeepalive(mgr);
   mgr.card.wakeWord?.disableStopModel();
-  // Re-arm stop word if media is playing in the background — disabling
+  // Re-arm stop word if media is playing in the background - disabling
   // above clears it for everyone.
   mgr.card.mediaPlayer?.refreshStopWord();
 
@@ -132,4 +146,36 @@ export function clearAlert(mgr) {
 function playAlertChime(mgr) {
   playChime(mgr.card, CHIME_ALERT, mgr.log);
   mgr.log.log('timer', 'Alert chime played');
+}
+
+/**
+ * Suppress both the in-app screensaver and Fully Kiosk's native one for
+ * as long as the timer alert is up.  Pings every 4 s - same cadence the
+ * media-player uses for video/image overlays.
+ * @param {import('./index.js').TimerManager} mgr
+ */
+function startScreensaverKeepalive(mgr) {
+  stopScreensaverKeepalive(mgr);
+  pingScreensaver(mgr);
+  _screensaverKeepaliveTimer = setInterval(
+    () => pingScreensaver(mgr),
+    SCREENSAVER_KEEPALIVE_MS,
+  );
+}
+
+/** @param {import('./index.js').TimerManager} _mgr */
+function stopScreensaverKeepalive(_mgr) {
+  if (_screensaverKeepaliveTimer) {
+    clearInterval(_screensaverKeepaliveTimer);
+    _screensaverKeepaliveTimer = null;
+  }
+}
+
+/** @param {import('./index.js').TimerManager} mgr */
+function pingScreensaver(mgr) {
+  mgr.card.screensaver?.notifyActivity?.();
+  if (typeof window !== 'undefined' && window.fully
+      && typeof window.fully.stopScreensaver === 'function') {
+    try { window.fully.stopScreensaver(); } catch (_e) { /* best-effort */ }
+  }
 }

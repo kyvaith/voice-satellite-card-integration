@@ -52,7 +52,7 @@ export class TtsManager {
     this._remoteInitialState = null;
     this._remoteInitialContentId = null;
 
-    // TTS URL from the current play() call — used to correlate tts-audio-duration events
+    // TTS URL from the current play() call - used to correlate tts-audio-duration events
     this._ttsUrl = null;
 
     // Stop word activation delay timer
@@ -76,7 +76,15 @@ export class TtsManager {
   play(urlPath, isRetry, mediaId) {
     const url = buildMediaUrl(urlPath);
     this._playing = true;
-    // Reset diagnostic timing — the 'Playback complete' log will compare
+    // Halt wake-word inference IMMEDIATELY - before audio loading begins
+    // and before pipeline.restart(0) at tts-end spins up a fresh wake-word
+    // backend.  Otherwise the new backend processes the speaker-residual
+    // mic audio and self-triggers (ok_nabu @ 0.8+ on rms<0.005 audio).
+    // Stop-word arming (if enabled) still happens on its 250 ms delay
+    // timer below - that's about AEC settling for the stop classifier,
+    // independent of suspending wake-word detection.
+    this._card.wakeWord?.suspendForPlayback();
+    // Reset diagnostic timing - the 'Playback complete' log will compare
     // these against the actual end time to detect early stream-close.
     this._playStartTs = performance.now();
     this._serverDuration = 0;
@@ -137,7 +145,7 @@ export class TtsManager {
       // Diagnostic timing - shows whether the Audio element fired 'ended'
       // after playing the full server-measured duration, or short-circuited
       // (streaming response closed early, decoder dropped a chunk, etc.).
-      // The most diagnostic value is `delta = el.currentTime - server` —
+      // The most diagnostic value is `delta = el.currentTime - server` -
       // a meaningfully negative number means the element reported `ended`
       // before the file's bytes had actually been played out.  Wall-clock
       // elapsed (from tts.play() through play() promise resolution and
@@ -274,7 +282,7 @@ export class TtsManager {
    * @param {string} [ttsUrl] - TTS proxy URL to correlate with current playback
    */
   setAudioDuration(duration, ttsUrl) {
-    // Log unconditionally — including for browser playback where the
+    // Log unconditionally - including for browser playback where the
     // duration is informational only.  Useful for diagnosing TTS-to-STT
     // bleed issues: comparing the server-measured duration against
     // audio.onended timing tells us whether the Audio element is firing
@@ -289,7 +297,7 @@ export class TtsManager {
     if (!duration) {
       this._log.log(
         'tts',
-        `Audio duration unavailable (server measurement failed) — el.duration=${elDurationStr} el.currentTime=${elCurrentStr}`,
+        `Audio duration unavailable (server measurement failed) - el.duration=${elDurationStr} el.currentTime=${elCurrentStr}`,
       );
       return;
     }
@@ -318,7 +326,7 @@ export class TtsManager {
       return;
     }
 
-    this._log.log('tts', `Audio duration applied — setting completion timer: ${baseLog}`);
+    this._log.log('tts', `Audio duration applied - setting completion timer: ${baseLog}`);
 
     // Replace the 30s safety timeout with a duration-based one (+ 2s buffer)
     if (this._endTimer) {
@@ -326,7 +334,7 @@ export class TtsManager {
     }
     this._endTimer = setTimeout(() => {
       this._endTimer = null;
-      this._log.log('tts', 'Duration-based timer fired — completing');
+      this._log.log('tts', 'Duration-based timer fired - completing');
       this._onComplete();
     }, (duration + 2) * 1000);
   }
@@ -350,7 +358,7 @@ export class TtsManager {
     if (!this._remoteSawPlaying) {
       if (!isActive) return;
 
-      // Player was already active when we started — only mark as saw-playing
+      // Player was already active when we started - only mark as saw-playing
       // when media_content_id changes (confirms our content loaded).
       // This avoids false-flagging pre-existing music as our TTS.
       const wasAlreadyActive = this._remoteInitialState === 'playing'
@@ -364,7 +372,7 @@ export class TtsManager {
     // ── Detect our content finished ──
     // Path 1: state left playing/buffering (player went idle/paused)
     if (!isActive) {
-      this._log.log('tts', `Remote player stopped (state: ${state}) — completing`);
+      this._log.log('tts', `Remote player stopped (state: ${state}) - completing`);
       this._onComplete();
       return;
     }
@@ -372,7 +380,7 @@ export class TtsManager {
     // Path 2: player was already active and media_content_id reverted to the
     // original (announce finished, previous media resumed)
     if (this._remoteInitialContentId && contentId === this._remoteInitialContentId) {
-      this._log.log('tts', 'Remote player resumed original content — completing');
+      this._log.log('tts', 'Remote player resumed original content - completing');
       this._onComplete();
     }
   }
@@ -418,6 +426,11 @@ export class TtsManager {
   _onComplete(playbackFailed) {
     this._log.log('tts', `Complete - cleaning up UI${playbackFailed ? ' (playback failed)' : ''}`);
     this._disableStopWord();
+    // Resume wake-word inference now that the speaker is silent.  Order
+    // matters: _disableStopWord runs first so if stop-only mode was on,
+    // disableStopModel restores the wake keywords; resumeFromPlayback
+    // then sees stop-only is off and clears the suspend cleanly.
+    this._card.wakeWord?.resumeFromPlayback();
     this._card.analyser.detachAudio();
     this._releaseAudio();
     this._playing = false;

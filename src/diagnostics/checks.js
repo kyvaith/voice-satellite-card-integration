@@ -9,6 +9,10 @@
  * presence) live in the Python side. See voice_satellite/run_diagnostics.
  */
 
+import { getSelectState } from '../shared/satellite-state.js';
+
+const WAKE_WORD_DETECTION_OWW = 'On Device (openWakeWord)';
+
 const CATEGORY = {
   ENVIRONMENT: 'Browser environment',
   FRONTEND: 'Voice Satellite bundle',
@@ -287,6 +291,50 @@ export const CLIENT_CHECKS = [
         detail: `Entity ${entityId} is not present in Home Assistant.`,
         remediation: 'Add the device in Settings → Devices & Services → Voice Satellite, then re-select it here.',
       };
+    },
+  },
+  {
+    // Conditional check: only runs when the satellite is set to On Device
+    // (openWakeWord).  OWW's mel + embedding stages are dispatched as
+    // WebGPU compute shaders; on a device without `navigator.gpu` the
+    // engine refuses to start at all and the satellite shows an error
+    // toast instead of detecting wake words.  Surface that here so users
+    // running diagnostics can see the cause before they hit it live.
+    id: 'sat.openwakeword-webgpu',
+    category: CATEGORY.SATELLITE,
+    title: 'openWakeWord can use WebGPU on this device',
+    run: async ({ hass, entityId }) => {
+      if (!entityId) return { status: 'skip' };
+      const mode = getSelectState(hass, entityId, 'wake_word_detection', '');
+      if (mode !== WAKE_WORD_DETECTION_OWW) {
+        return { status: 'skip', detail: `Wake word detection is "${mode || 'unknown'}" — WebGPU is only required for openWakeWord.` };
+      }
+      if (!('gpu' in navigator)) {
+        return {
+          status: 'fail',
+          detail: 'navigator.gpu is not exposed on this device. openWakeWord cannot start without WebGPU.',
+          remediation: 'Switch "Wake word detection" to "On Device (microWakeWord)" on the satellite\'s device page. microWakeWord runs on CPU and works without WebGPU.',
+        };
+      }
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          return {
+            status: 'fail',
+            detail: 'navigator.gpu is exposed but requestAdapter() returned null — the system has no usable GPU adapter for WebGPU.',
+            remediation: 'Switch "Wake word detection" to "On Device (microWakeWord)". On Android, ensure the WebView is up to date; on Linux, WebGPU requires a recent Chromium build with hardware acceleration enabled.',
+          };
+        }
+        const info = adapter.info || {};
+        const desc = [info.vendor, info.architecture].filter(Boolean).join(' / ') || 'adapter available';
+        return { status: 'pass', detail: `WebGPU adapter present (${desc}).` };
+      } catch (err) {
+        return {
+          status: 'warn',
+          detail: `WebGPU adapter probe failed: ${err?.message || err}. openWakeWord may fail to start.`,
+          remediation: 'Switch to "On Device (microWakeWord)" if openWakeWord does not start when the satellite is loaded.',
+        };
+      }
     },
   },
 

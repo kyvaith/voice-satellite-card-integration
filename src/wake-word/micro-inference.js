@@ -9,8 +9,8 @@
  * Each keyword model is stateful (internal ring buffers via VarHandle ops).
  * V2 models have feature_step_size=10 meaning we accumulate 10 feature frames
  * before running inference. The model's input tensor may be [1, 1, 40] (streaming
- * one frame at a time with internal state) — in that case we call infer() per
- * frame and use the final probability. Output is uint8 [0–255].
+ * one frame at a time with internal state) - in that case we call infer() per
+ * frame and use the final probability. Output is uint8 [0-255].
  * Detection uses a circular buffer of recent probabilities compared against
  * the cutoff threshold.
  */
@@ -27,7 +27,7 @@ const BORDERLINE_CONFIRM_MARGIN = 0.03;
 const BORDERLINE_CONFIRM_WINDOW_MS = 750;
 
 
-// Energy-based sleep mode — skip inference during silence.
+// Energy-based sleep mode - skip inference during silence.
 // RMS thresholds are for float32 audio in [-1, 1] range.
 // Keyed by sensitivity label; higher thresholds = more noise filtered out.
 const ENERGY_THRESHOLDS = {
@@ -58,7 +58,7 @@ export class MicroWakeWordInference {
    * @param {boolean} [energyGateEnabled=false] - enable energy-based sleep mode
    */
   /**
-   * Async factory — replaces direct `new MicroWakeWordInference(...)`.
+   * Async factory - replaces direct `new MicroWakeWordInference(...)`.
    * Loads the shared JavaScript micro_frontend before constructing the
    * inference engine.
    *
@@ -72,7 +72,7 @@ export class MicroWakeWordInference {
   }
 
   /**
-   * Direct constructor — takes a pre-loaded frontend. Prefer the
+   * Direct constructor - takes a pre-loaded frontend. Prefer the
    * static `create()` factory unless you already have a frontend
    * instance you want to reuse (e.g. in tests).
    */
@@ -90,7 +90,7 @@ export class MicroWakeWordInference {
     this._sleeping = false;
     this._silentChunks = 0;
 
-    // Live mic level — read by the Wake Word Tester to draw the meter.
+    // Live mic level - read by the Wake Word Tester to draw the meter.
     this._latestRms = 0;
 
     // Ring buffer for feature frames during sleep (avoids splice/shift)
@@ -187,18 +187,18 @@ export class MicroWakeWordInference {
           this._sleeping = true;
           this._sleepBufLen = 0;
           this._sleepBufHead = 0;
-          this._log.log('wake-word', `Sleep — inference paused (rms=${rms.toFixed(4)})`);
+          this._log.log('wake-word', `Sleep - inference paused (rms=${rms.toFixed(4)})`);
         }
       } else if (rms >= this._wakeRms) {
         this._silentChunks = 0;
         if (this._sleeping) {
           this._sleeping = false;
-          this._log.log('wake-word', `Wake — inference resumed (rms=${rms.toFixed(4)}, buffered=${this._sleepBufLen} frames)`);
+          this._log.log('wake-word', `Wake - inference resumed (rms=${rms.toFixed(4)}, buffered=${this._sleepBufLen} frames)`);
         }
       }
     }
 
-    // Generate feature frames (always — keeps noise estimate warm)
+    // Generate feature frames (always - keeps noise estimate warm)
     const features = this._frontend.feed(samples);
 
     if (this._sleeping) {
@@ -208,10 +208,10 @@ export class MicroWakeWordInference {
         this._sleepBufHead = (this._sleepBufHead + 1) % this._sleepBufCap;
         if (this._sleepBufLen < this._sleepBufCap) this._sleepBufLen++;
       }
-      return { detected: false, score: 0, vadScore: 0, model: null };
+      return { detected: false, score: 0, vadScore: 0, model: null, perModelScores: this._perModelScores() };
     }
 
-    // Drain ring buffer on wake — oldest-first order for correct replay
+    // Drain ring buffer on wake - oldest-first order for correct replay
     let allFeatures = features;
     let replayCount = 0;
     if (this._sleepBufLen > 0) {
@@ -228,7 +228,7 @@ export class MicroWakeWordInference {
     }
 
     if (allFeatures.length === 0) {
-      return { detected: false, score: 0, vadScore: 0, model: null };
+      return { detected: false, score: 0, vadScore: 0, model: null, perModelScores: this._perModelScores() };
     }
 
     const now = Date.now();
@@ -267,7 +267,7 @@ export class MicroWakeWordInference {
           kw.featureAccumLen = 0;
         }
 
-        // Skip warmup period — model state from previous detection may still
+        // Skip warmup period - model state from previous detection may still
         // be warm, so don't store probs until state has flushed with silence.
         if (kw.framesProcessed < WARMUP_FRAMES) continue;
 
@@ -308,13 +308,14 @@ export class MicroWakeWordInference {
               cutoff: kw.cutoff,
               rms,
               immediateMargin: mean - kw.cutoff,
+              perModelScores: this._perModelScores(),
             };
           }
         }
       }
     }
 
-    return { detected: false, score: 0, vadScore: 0, model: null };
+    return { detected: false, score: 0, vadScore: 0, model: null, perModelScores: this._perModelScores() };
   }
 
   /**
@@ -431,7 +432,7 @@ export class MicroWakeWordInference {
    * Sliding-window mean of recent inferences for the given keyword. This
    * is the value the engine actually compares against the cutoff for
    * detection, so it's the right signal to display in the Wake Word
-   * Tester — single-shot inference probabilities have high natural
+   * Tester - single-shot inference probabilities have high natural
    * variance even on identical input, but the smoothed mean is what
    * determines whether the wake word fires. Returns 0 until the window
    * has filled (after warmup).
@@ -440,6 +441,20 @@ export class MicroWakeWordInference {
     const kw = this._keywords.find((k) => k.name === name);
     if (!kw || kw.probCount === 0) return 0;
     return kw.probSum / kw.probCount;
+  }
+
+  /**
+   * Snapshot all keywords' current sliding-window means.  Included in
+   * processChunk's return shape so the WorkerProxyBackend can drive the
+   * panel tester's chart without needing a separate sync round-trip.
+   * Mirrors the OWW backend's perModelScores field.
+   */
+  _perModelScores() {
+    const out = {};
+    for (const kw of this._keywords) {
+      out[kw.name] = kw.probCount > 0 ? (kw.probSum / kw.probCount) : 0;
+    }
+    return out;
   }
 
   /**
@@ -475,7 +490,7 @@ export class MicroWakeWordInference {
       this._silentChunks = 0;
       this._sleepBufLen = 0;
       this._sleepBufHead = 0;
-      this._log.log('wake-word', 'Energy gate disabled — inference always active');
+      this._log.log('wake-word', 'Energy gate disabled - inference always active');
     }
   }
 
@@ -506,7 +521,7 @@ export class MicroWakeWordInference {
     this._silentChunks = 0;
     this._sleepBufLen = 0;
     this._sleepBufHead = 0;
-    // Preserve _lastDetectionTime — the 2s cooldown prevents false
+    // Preserve _lastDetectionTime - the 2s cooldown prevents false
     // re-detection from stale model state (VarHandle ring buffers persist).
     for (const kw of this._keywords) {
       kw.probBuffer.fill(0);

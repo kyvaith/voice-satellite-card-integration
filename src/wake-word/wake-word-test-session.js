@@ -3,11 +3,11 @@
  *
  * Self-contained mic + AudioContext + AudioWorklet + wake-word inference
  * loop used by the sidebar panel's Wake Word Tester card. Independent
- * of the main wake word engine — works whether the engine is dormant,
+ * of the main wake word engine - works whether the engine is dormant,
  * running with on-device wake word, or using HA-side wake word.
  *
  * Uses an *isolated* model runner (createIsolatedModelRunner) so it can
- * run in parallel with the main engine without sharing — and corrupting —
+ * run in parallel with the main engine without sharing - and corrupting -
  * the cached runner's stateful VarHandleOps.
  */
 
@@ -17,6 +17,8 @@ import {
   getMicroModelParams,
 } from './micro-models.js';
 import { MicroWakeWordInference } from './micro-inference.js';
+import { OwwBackend } from './oww/backend.js';
+import { WorkerProxyBackend } from './worker/proxy-backend.js';
 
 const CHUNK_SIZE = 1280; // 80ms @ 16 kHz
 const TARGET_RATE = 16000;
@@ -59,17 +61,28 @@ export class WakeWordTestSession {
     // Rolling capture for offline inspection.  Holds the most recent
     // CAPTURE_SECONDS of 16 kHz mono Float32 samples that were fed to the
     // frontend, so the user can dump exactly what the JS pipeline saw right
-    // before a (possibly false) trigger.  Overwrites itself — ring buffer.
+    // before a (possibly false) trigger.  Overwrites itself - ring buffer.
     this._captureSeconds = 6;
     this._captureBuf = new Float32Array(TARGET_RATE * this._captureSeconds);
     this._captureHead = 0;      // next write index
     this._captureFilled = 0;    // total samples ever written (for "how full")
+
+    // Per-chunk inference latency telemetry.  Used to compare CPU MWW vs
+    // GPU OWW on the user's actual hardware.  Logs a summary every
+    // PERF_LOG_INTERVAL chunks via the 'diag' category so the tester's
+    // log pane shows it.
+    this._perfTimes = [];           // ring of recent ms readings
+    this._perfRingSize = 200;       // last ~16 s at 80 ms/chunk
+    this._perfRingHead = 0;
+    this._perfRingFilled = 0;
+    this._perfReportEvery = 25;     // 25 chunks ≈ 2 s
+    this._perfChunksSinceReport = 0;
   }
 
   /**
    * Export the last few seconds of audio fed to the frontend as a 16 kHz
    * mono WAV (Int16 PCM).  Triggers a browser download.  Useful when live
-   * probabilities diverge from offline WAV tests — the returned file is the
+   * probabilities diverge from offline WAV tests - the returned file is the
    * exact signal the JS frontend processed, including mic + DSP + resampling.
    */
   exportCapture(filename = 'voice-satellite-capture.wav') {
@@ -124,7 +137,7 @@ export class WakeWordTestSession {
   get lastDetectionAt() { return this._lastDetectionAt; }
   get lastDetectionInfo() { return this._lastDetectionInfo; }
   /**
-   * Sliding-window mean over recent inferences — what the engine actually
+   * Sliding-window mean over recent inferences - what the engine actually
    * compares against the cutoff. The Wake Word Tester graphs this value.
    */
   getLatestSmoothedProbability() {
@@ -146,9 +159,17 @@ export class WakeWordTestSession {
     this._modelName = modelName;
     this._constraints = opts.constraints || null;
     this._threshold = typeof opts.threshold === 'number' ? opts.threshold : null;
+    // Engine selector: 'mww' (default) or 'oww'.  Determines which
+    // inference backend the tester instantiates in _setupInference().
+    this._engine = opts.engine === 'oww' ? 'oww' : 'mww';
+    // Mirror the live engine's noise-gate behavior so the tester gives
+    // a faithful preview of what the user will experience at runtime.
+    this._energyGateEnabled = opts.energyGateEnabled === true;
+    this._sensitivityLabel = opts.sensitivityLabel || 'Moderately sensitive';
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
+    this._resetPerfStats();
 
     await this._acquireMic();
     await this._setupAudioContext();
@@ -216,6 +237,7 @@ export class WakeWordTestSession {
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
+    this._resetPerfStats();
 
     if (this._isolatedRunner) {
       try { this._isolatedRunner.cleanUp?.(); } catch (_) {}
@@ -242,7 +264,7 @@ export class WakeWordTestSession {
   async _acquireMic() {
     // Mirror the main engine's mic constraints so the tester runs against
     // the same processed signal the engine will see at runtime. If the
-    // caller didn't supply constraints, default to "raw" — every DSP off —
+    // caller didn't supply constraints, default to "raw" - every DSP off -
     // so the user tests against the unmodified mic.
     const c = this._constraints || {};
     const requested = {
@@ -287,14 +309,14 @@ export class WakeWordTestSession {
           + `rate=${s.sampleRate ?? '?'}Hz ch=${s.channelCount ?? '?'}${label}`,
         );
         // Call out mismatches between what we asked for and what the driver
-        // actually gave us — these are the common root cause of "I turned
+        // actually gave us - these are the common root cause of "I turned
         // AGC off but clipping guard still fires" reports.
         const mism = [];
         for (const key of ['echoCancellation', 'noiseSuppression', 'autoGainControl', 'voiceIsolation']) {
           if (!!s[key] !== requested[key]) mism.push(`${key}: requested ${requested[key]}, got ${!!s[key]}`);
         }
         if (mism.length) {
-          this._emitLog('warn', `mic driver overrode DSP request — ${mism.join('; ')}`);
+          this._emitLog('warn', `mic driver overrode DSP request - ${mism.join('; ')}`);
         }
       }
     } catch (_) { /* best-effort diagnostic */ }
@@ -353,24 +375,19 @@ export class WakeWordTestSession {
   }
 
   async _setupInference() {
-    const runtime = await loadTFLite();
-    this._isolatedRunner = await createIsolatedModelRunner(runtime, this._modelName);
-    const params = getMicroModelParams(this._modelName);
-
-    this._inference = await MicroWakeWordInference.create(
-      [{
-        runner: this._isolatedRunner,
-        name: this._modelName,
-        cutoff: this._threshold ?? params.cutoff,
-        slidingWindow: params.slidingWindow,
-        stepSize: params.stepSize,
-        inputScale: params.inputScale,
-        inputZeroPoint: params.inputZeroPoint,
-      }],
-      this._instanceLog,
-      'Moderately sensitive',
-      false, // energy gate disabled — keep RMS readout always live
-    );
+    // Tester always goes through its own Worker - keeps inference off
+    // the main thread (so the chart rAF stays smooth) and gives this
+    // session its own isolated backend state independent of the live
+    // engine's worker.
+    const cutoff = this._threshold ?? (this._engine === 'oww' ? 0.5 : getMicroModelParams(this._modelName)?.cutoff);
+    this._inference = await WorkerProxyBackend.create({
+      engine: this._engine === 'oww' ? 'oww' : 'mww',
+      models: [this._modelName],
+      cutoffs: { [this._modelName]: cutoff },
+      energyGateEnabled: this._energyGateEnabled,
+      sensitivityLabel: this._sensitivityLabel,
+      log: this._instanceLog,
+    });
   }
 
   // ─── Audio processing ───────────────────────────────────────────────
@@ -423,7 +440,10 @@ export class WakeWordTestSession {
       while (this._frameQueue.length > 0 && this._running && this._inference) {
         const frame = this._frameQueue.shift();
         try {
+          const t0 = performance.now();
           const result = await this._inference.processChunk(frame);
+          const dt = performance.now() - t0;
+          this._recordPerfSample(dt);
           if (result?.detected) {
             this._detectionSeq++;
             this._lastDetectionAt =
@@ -439,7 +459,7 @@ export class WakeWordTestSession {
               `DETECTED "${model}" mean=${mean} cutoff=${cutoff} rms=${(result.rms ?? 0).toFixed(3)}`,
             );
           }
-        } catch (_) { /* swallow — the tester is best-effort */ }
+        } catch (_) { /* swallow - the tester is best-effort */ }
       }
     } finally {
       this._processing = false;
@@ -463,6 +483,62 @@ export class WakeWordTestSession {
     for (const cb of this._logSubscribers) {
       try { cb(cat, msg, ts); } catch (_) { /* ignore */ }
     }
+  }
+
+  /**
+   * Append a per-chunk inference latency sample to the ring buffer and
+   * emit a summary line every _perfReportEvery chunks.  The summary is
+   * useful for comparing engines on identical hardware: switch the engine
+   * select, restart the tester, and the log pane prints avg/p50/p95 over
+   * the most recent ~16 s of audio (200 chunks).
+   */
+  _recordPerfSample(ms) {
+    if (!Number.isFinite(ms)) return;
+    this._perfTimes[this._perfRingHead] = ms;
+    this._perfRingHead = (this._perfRingHead + 1) % this._perfRingSize;
+    if (this._perfRingFilled < this._perfRingSize) this._perfRingFilled++;
+    this._perfChunksSinceReport++;
+    if (this._perfChunksSinceReport < this._perfReportEvery) return;
+    this._perfChunksSinceReport = 0;
+    this._emitPerfSummary();
+  }
+
+  /** Public accessor — useful for capturing numbers from devtools. */
+  getPerfStats() {
+    if (this._perfRingFilled < 5) return null;
+    const samples = this._perfTimes.slice(0, this._perfRingFilled).slice().sort((a, b) => a - b);
+    const n = samples.length;
+    const sum = samples.reduce((s, v) => s + v, 0);
+    return {
+      engine: this._engine || 'mww',
+      model: this._modelName || null,
+      count: n,
+      avg: sum / n,
+      min: samples[0],
+      max: samples[n - 1],
+      p50: samples[Math.floor(n * 0.50)],
+      p95: samples[Math.min(n - 1, Math.floor(n * 0.95))],
+      p99: samples[Math.min(n - 1, Math.floor(n * 0.99))],
+    };
+  }
+
+  _emitPerfSummary() {
+    const s = this.getPerfStats();
+    if (!s) return;
+    const fmt = (v) => v.toFixed(1);
+    this._emitLog(
+      'diag',
+      `perf ${s.engine.toUpperCase()} (${s.model}) n=${s.count} chunks: `
+      + `avg=${fmt(s.avg)}ms min=${fmt(s.min)}ms p50=${fmt(s.p50)}ms `
+      + `p95=${fmt(s.p95)}ms p99=${fmt(s.p99)}ms max=${fmt(s.max)}ms (budget=80ms)`,
+    );
+  }
+
+  _resetPerfStats() {
+    this._perfRingHead = 0;
+    this._perfRingFilled = 0;
+    this._perfChunksSinceReport = 0;
+    this._perfTimes.length = 0;
   }
 
   _resample(input, fromRate, toRate) {

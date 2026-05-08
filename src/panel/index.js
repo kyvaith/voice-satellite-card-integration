@@ -30,7 +30,7 @@ import { openMediaPicker, deriveParentMediaId } from './media-picker-dialog.js';
 import { WakeWordTestSession } from '../wake-word/wake-word-test-session.js';
 import { resolveDspForMode } from '../audio/dsp-config.js';
 import { getMicroModelParams } from '../wake-word/micro-models.js';
-import { getSelectOptions } from '../shared/satellite-state.js';
+import { getSelectOptions, getSelectAttribute, getSelectState, getSwitchState } from '../shared/satellite-state.js';
 import { DiagnosticsManager } from '../diagnostics';
 import { buildMarkdownReport } from '../diagnostics/report.js';
 
@@ -143,7 +143,7 @@ async function _loadComponents() {
           if (CardClass?.getConfigElement) {
             await CardClass.getConfigElement();
           }
-        } catch (_) { /* ignore — just need the import side-effect */ }
+        } catch (_) { /* ignore - just need the import side-effect */ }
       }
     }
   }
@@ -168,7 +168,7 @@ class VoiceSatellitePanel extends HTMLElement {
       const stt = `stt_${key}`;
       if (this._config[stt] === undefined) this._config[stt] = legacy;
     }
-    // v6.10.x shipped wake-word DSP defaulting to off — fix persisted
+    // v6.10.x shipped wake-word DSP defaulting to off - fix persisted
     // false values back to true (matching Voice PE hardware behavior).
     if (!(this._config._dsp_version >= 2)) {
       this._config.wake_word_noise_suppression = true;
@@ -397,7 +397,7 @@ class VoiceSatellitePanel extends HTMLElement {
     const autostartForm = this.querySelector(`.${P}-autostart-container ha-form`);
     if (autostartForm) autostartForm.data = Object.assign({}, this._config);
 
-    // Sync Screensaver sub-forms — rebuild schemas if enabled or type
+    // Sync Screensaver sub-forms - rebuild schemas if enabled or type
     // changed so the relevant fields show or hide.
     const ssStructureChanged =
       this._config.screensaver_type !== prevScreensaverType ||
@@ -449,7 +449,7 @@ class VoiceSatellitePanel extends HTMLElement {
       status.classList.toggle('is-missing', !detected);
       status.textContent = detected
         ? '✓ Fully Kiosk JavaScript Interface detected.'
-        : '⚠ Fully Kiosk JavaScript Interface not detected — controls disabled.';
+        : '⚠ Fully Kiosk JavaScript Interface not detected - controls disabled.';
     }
 
     const formWrap = this.querySelector(`.${P}-ss-fk-form`);
@@ -457,7 +457,7 @@ class VoiceSatellitePanel extends HTMLElement {
     if (this._ssFkForm) this._ssFkForm.disabled = !detected;
   }
 
-  /** Toggle visibility of the Media Browse widget — only shown when
+  /** Toggle visibility of the Media Browse widget - only shown when
    *  the screensaver is enabled AND type='media'. */
   _updateScreensaverMediaVisibility() {
     const container = this.querySelector(`.${P}-ss-media`);
@@ -468,7 +468,7 @@ class VoiceSatellitePanel extends HTMLElement {
     container.style.display = visible ? 'flex' : 'none';
     if (visible) this._renderScreensaverMediaCurrent();
 
-    // Same visibility rule for the iframe-embedding hint — only shown
+    // Same visibility rule for the iframe-embedding hint - only shown
     // when the screensaver is enabled AND the type is 'website'.
     const hint = this.querySelector(`.${P}-ss-website-hint`);
     if (hint) {
@@ -1186,7 +1186,7 @@ class VoiceSatellitePanel extends HTMLElement {
         .${P}-tester-log-entry.is-diag {
           color: #b0bec5;
         }
-        /* Wake-word DSP warning — the actual warning element gets
+        /* Wake-word DSP warning - the actual warning element gets
            inline-styled because it's injected into ha-form-expandable's
            shadow root, which light-DOM CSS can't penetrate. */
         .${P}-footer {
@@ -1325,6 +1325,14 @@ class VoiceSatellitePanel extends HTMLElement {
         </div>
 
         <div class="${P}-tester-row">
+          <label class="${P}-tester-label" for="${P}-tester-engine">Engine</label>
+          <select class="${P}-tester-model" id="${P}-tester-engine">
+            <option value="mww" selected>microWakeWord</option>
+            <option value="oww">openWakeWord</option>
+          </select>
+        </div>
+
+        <div class="${P}-tester-row">
           <label class="${P}-tester-label" for="${P}-tester-model">Model</label>
           <select class="${P}-tester-model" id="${P}-tester-model"></select>
         </div>
@@ -1368,7 +1376,7 @@ class VoiceSatellitePanel extends HTMLElement {
 
         <div class="${P}-tester-log-row">
           <div class="${P}-tester-log-header">
-            <span>Live log — probabilities, warnings, and triggers</span>
+            <span>Live log - probabilities, warnings, and triggers</span>
             <button type="button" class="${P}-tester-log-clear">Clear</button>
           </div>
           <div class="${P}-tester-log" role="log" aria-live="polite"></div>
@@ -1377,7 +1385,7 @@ class VoiceSatellitePanel extends HTMLElement {
         <div class="${P}-hint">
           Click <strong>Start</strong> to grant mic access and begin
           monitoring. Stand at your usual distance and say the wake word.
-          The probability curve should cross the dashed threshold line —
+          The probability curve should cross the dashed threshold line -
           when it does, the engine would have triggered a detection.
         </div>
       </div>
@@ -1703,16 +1711,17 @@ class VoiceSatellitePanel extends HTMLElement {
 
     card.classList.add('is-idle');
 
+    const engineSelect = card.querySelector(`#${P}-tester-engine`);
     const modelSelect = card.querySelector(`#${P}-tester-model`);
     const sensitivitySelect = card.querySelector(`#${P}-tester-sensitivity`);
     const toggleBtn = card.querySelector(`.${P}-tester-toggle`);
     const thresholdValEl = card.querySelector(`.${P}-tester-threshold-val`);
 
-    // Probability ring buffer (~6s @ 30Hz = 180 samples) — drives the
+    // Probability ring buffer (~6s @ 30Hz = 180 samples) - drives the
     // scrolling chart only. Peak is tracked separately as a session-max
     // value that persists across the chart's rolling window so the user
     // can compare attempts that happened more than 6s apart. The peak
-    // resets on each Start (no separate Reset button — keep the UI minimal).
+    // resets on each Start (no separate Reset button - keep the UI minimal).
     this._testerProbBuf = new Float32Array(180);
     this._testerProbHead = 0;
     this._testerProbCount = 0;
@@ -1722,22 +1731,49 @@ class VoiceSatellitePanel extends HTMLElement {
     // the dashed line on the graph and rendered next to the readouts.
     this._testerThreshold = 0.85;
 
-    // Standalone tester session (lazy — created on first Start click)
+    // Standalone tester session (lazy - created on first Start click)
     this._testerSession = null;
 
-    // Populate model dropdown from the HA entity's options list (which
-    // includes built-in + any custom .tflite files discovered at startup).
+    // Populate the engine dropdown's *selected* default by mirroring the
+    // active detection mode.  If on-device wake word is currently OWW we
+    // pre-select OWW in the tester so the user starts from the same
+    // engine they're running.  Otherwise default to MWW.
+    const initialDetectionMode = getSelectState(
+      this._hass, this._config.satellite_entity, 'wake_word_detection', '',
+    );
+    if (engineSelect && initialDetectionMode === 'On Device (openWakeWord)') {
+      engineSelect.value = 'oww';
+    }
+
+    // Engine-aware model dropdown.  We read both catalogs from the
+    // wake_word_model entity's extra_state_attributes (mww_models +
+    // oww_models) so the tester can swap engines without depending on
+    // what the main engine is currently running.
+    const MWW_FALLBACK = ['ok_nabu', 'hey_jarvis', 'hey_mycroft', 'alexa',
+      'hey_home_assistant', 'hey_luna', 'okay_computer'];
+
     const populate = () => {
-      const entityOptions = getSelectOptions(
-        this._hass, this._config.satellite_entity, 'wake_word_model',
+      const engine = engineSelect?.value || 'mww';
+      const attrName = engine === 'oww' ? 'oww_models' : 'mww_models';
+      const fromEntity = getSelectAttribute(
+        this._hass, this._config.satellite_entity, 'wake_word_model', attrName,
       );
-      const fallback = ['ok_nabu', 'hey_jarvis', 'hey_mycroft', 'alexa',
-        'hey_home_assistant', 'hey_luna', 'okay_computer'];
-      const session = this._getSession();
-      const ww = session?.wakeWord;
-      const active = ww ? ww.getActiveModels() : [];
-      const all = Array.from(new Set([...active, ...(entityOptions.length ? entityOptions : fallback)]))
-        .filter((m) => m && m !== 'No wake word' && m !== 'stop');
+      let pool = Array.isArray(fromEntity) ? fromEntity : null;
+      if (!pool || pool.length === 0) {
+        // Backward-compat: older versions only exposed the dynamic
+        // `options` list (which depends on detection mode).  Fall back
+        // to that, then to the built-in MWW list as a last resort.
+        const opts = getSelectOptions(this._hass, this._config.satellite_entity, 'wake_word_model');
+        pool = engine === 'mww' && opts.length ? opts : (engine === 'mww' ? MWW_FALLBACK : []);
+      }
+      const all = pool.filter((m) => m && m !== 'No wake word');
+      // 'stop' is filtered out of the main wake-word dropdowns (it's an
+      // interruption classifier, not a wake word), so it doesn't appear
+      // in the engine-supplied model list.  Surface it here so the tester
+      // can verify the stop classifier in isolation when interruptions
+      // aren't firing.  Both engines ship a stop.tflite alongside their
+      // wake words.
+      if (!all.includes('stop')) all.push('stop');
       const current = modelSelect.value;
       modelSelect.innerHTML = '';
       for (const name of all) {
@@ -1746,21 +1782,32 @@ class VoiceSatellitePanel extends HTMLElement {
         opt.textContent = name;
         modelSelect.appendChild(opt);
       }
-      const initial = current || active[0] || all[0];
-      if (initial) modelSelect.value = initial;
+      // Keep current selection if still valid; otherwise pick the first.
+      if (current && all.includes(current)) {
+        modelSelect.value = current;
+      } else if (all.length > 0) {
+        modelSelect.value = all[0];
+      }
     };
 
     populate();
+    this._testerEngine = engineSelect?.value || 'mww';
     this._testerSelectedModel = modelSelect.value;
     this._testerSensitivity = sensitivitySelect?.value || 'Moderately sensitive';
 
     const updateThresholdForModel = () => {
+      const engine = engineSelect?.value || 'mww';
       const name = modelSelect.value;
       const sensitivity = sensitivitySelect?.value || 'Moderately sensitive';
+      this._testerEngine = engine;
       this._testerSelectedModel = name;
       this._testerSensitivity = sensitivity;
-      const params = getMicroModelParams(name);
-      const baseCutoff = params?.cutoff ?? 0.85;
+      // openWakeWord wake-word classifiers ship with calibrated 0.5 cutoffs;
+      // stop is bumped to 0.65 (community model is FP-prone at 0.5).
+      // microWakeWord cutoffs come from the per-model JSON manifest.
+      const baseCutoff = engine === 'oww'
+        ? (name === 'stop' ? 0.65 : 0.5)
+        : (getMicroModelParams(name)?.cutoff ?? 0.85);
       const factors = name === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
       const factor = factors[sensitivity] ?? 1.0;
       this._testerThreshold = Math.max(0.1, Math.min(1 - (1 - baseCutoff) * factor, 0.99));
@@ -1777,6 +1824,19 @@ class VoiceSatellitePanel extends HTMLElement {
 
     updateThresholdForModel();
 
+    engineSelect?.addEventListener('change', async () => {
+      // Engine flip → repopulate model list, then recompute threshold.
+      // If a tester session is running, fully restart it (the new engine
+      // needs different model files loaded - switchModel can't bridge
+      // engines mid-session).
+      populate();
+      updateThresholdForModel();
+      if (this._testerSession?.running) {
+        await this._stopTesterSession();
+        await this._startTesterSession();
+      }
+    });
+
     modelSelect.addEventListener('change', async () => {
       updateThresholdForModel();
       // If a tester session is running, switch models on the fly so the
@@ -1787,7 +1847,7 @@ class VoiceSatellitePanel extends HTMLElement {
             threshold: this._testerThreshold,
           });
         } catch (e) {
-          // Best effort — failure here just means the next sample is stale.
+          // Best effort - failure here just means the next sample is stale.
         }
       }
     });
@@ -1851,7 +1911,7 @@ class VoiceSatellitePanel extends HTMLElement {
       // the audio path the main engine uses during wake-word listening.
       const dsp = resolveDspForMode(this._config, 'wake_word');
 
-      // Subscribe to the session's log BEFORE calling start() — the DSP
+      // Subscribe to the session's log BEFORE calling start() - the DSP
       // requested/applied diagnostic emits during _acquireMic(), which runs
       // inside start().  If we subscribed afterwards we'd miss those lines.
       this._clearTesterLog();
@@ -1859,8 +1919,16 @@ class VoiceSatellitePanel extends HTMLElement {
         (cat, msg, ts) => this._appendTesterLog(cat, msg, ts),
       );
 
+      // Mirror the satellite's noise-gate switch so the tester runs
+      // with the same energy-gate behavior the live engine will use.
+      const noiseGateOn = getSwitchState(
+        this._hass, this._config.satellite_entity, 'noise_gate',
+      ) === true;
       await this._testerSession.start(this._testerSelectedModel, {
+        engine: this._testerEngine || 'mww',
         threshold: this._testerThreshold,
+        energyGateEnabled: noiseGateOn,
+        sensitivityLabel: this._testerSensitivity || 'Moderately sensitive',
         constraints: {
           echoCancellation: dsp.echoCancellation === true,
           noiseSuppression: dsp.noiseSuppression === true,
@@ -1875,7 +1943,11 @@ class VoiceSatellitePanel extends HTMLElement {
       this._testerProbCount = 0;
       this._testerProbHead = 0;
       this._testerProbBuf.fill(0);
-      this._appendTesterLog('info', `started "${this._testerSelectedModel}" — listening`);
+      const engineLabel = this._testerEngine === 'oww' ? 'openWakeWord' : 'microWakeWord';
+      this._appendTesterLog(
+        'info',
+        `started "${this._testerSelectedModel}" (${engineLabel}) - listening`,
+      );
 
       card.classList.remove('is-idle');
       toggleBtn.classList.add('is-running');
@@ -1985,7 +2057,7 @@ class VoiceSatellitePanel extends HTMLElement {
         if (fillEl) fillEl.style.width = `${(rmsPct * 100).toFixed(1)}%`;
         if (valueEl) valueEl.textContent = rms.toFixed(3);
 
-        // Smoothed (sliding-window mean) probability — what the engine
+        // Smoothed (sliding-window mean) probability - what the engine
         // actually compares against the cutoff for detection.
         const prob = cs ? Math.max(0, cs.getLatestSmoothedProbability()) : 0;
         const buf = this._testerProbBuf;
@@ -2015,7 +2087,7 @@ class VoiceSatellitePanel extends HTMLElement {
   /**
    * Draw the static parts of the chart (grid + dashed threshold line)
    * once, without the live waveform. Called from init and on model
-   * change so the chart is never blank — the user always sees where
+   * change so the chart is never blank - the user always sees where
    * the detection threshold lives even before they click Start.
    */
   _renderTesterIdleChart() {
@@ -2083,7 +2155,7 @@ class VoiceSatellitePanel extends HTMLElement {
       ctx.fillText(xTicks[i], x, plotY0 + plotH + 4);
     }
 
-    // Probability waveform — newest sample at the right edge.
+    // Probability waveform - newest sample at the right edge.
     // Below-threshold segments stay blue; the portion above the threshold
     // is highlighted in red with exact threshold-crossing splits so the
     // preceding segment does not get tinted accidentally.
@@ -2200,7 +2272,7 @@ class VoiceSatellitePanel extends HTMLElement {
       entityContainer.appendChild(entityForm);
     }
 
-    // Auto start toggle — sits in the same Settings card, below the
+    // Auto start toggle - sits in the same Settings card, below the
     // entity picker. Routed through the same change handler as the lower
     // Advanced form so propagation to the running session is identical.
     const autostartContainer = this.querySelector(`.${P}-autostart-container`);
@@ -2222,7 +2294,7 @@ class VoiceSatellitePanel extends HTMLElement {
     if (!container) return;
     container.innerHTML = '';
 
-    // Single ha-form, unchanged rendering — one call, nothing custom.
+    // Single ha-form, unchanged rendering - one call, nothing custom.
     const form = document.createElement('ha-form');
     form.hass = this._hass;
     form.data = Object.assign({}, this._config);
@@ -2233,7 +2305,7 @@ class VoiceSatellitePanel extends HTMLElement {
     container.appendChild(form);
     this._settingsForm = form;
 
-    // Screensaver — split into pre/post forms so the Media Browse
+    // Screensaver - split into pre/post forms so the Media Browse
     // widget can render directly under the Type dropdown instead of
     // at the end of the form.
     const makeSsForm = (schema) => {
@@ -2263,7 +2335,7 @@ class VoiceSatellitePanel extends HTMLElement {
       this._ssPostForm = postForm;
     }
 
-    // Fully Kiosk Integration sub-form — a separate ha-form so we can
+    // Fully Kiosk Integration sub-form - a separate ha-form so we can
     // gracefully disable the whole thing when Fully Kiosk isn't
     // detected, and surface a detection banner above it.
     const fkFormContainer = this.querySelector(`.${P}-ss-fk-form`);
