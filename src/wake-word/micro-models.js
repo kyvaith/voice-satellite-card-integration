@@ -171,6 +171,12 @@ export function getMicroModelParams(modelName) {
   };
 }
 
+export async function loadMicroModelParams(modelName) {
+  const filename = TFLITE_KEYWORD_FILES[modelName] || modelName;
+  await _loadModelManifest(filename);
+  return getMicroModelParams(modelName);
+}
+
 export async function releaseUnusedMicroModels(activeNames, { includeStop } = {}) {
   const active = new Set(activeNames);
   for (const [name, runner] of Object.entries(_modelCache)) {

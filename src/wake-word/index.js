@@ -465,14 +465,13 @@ export class WakeWordManager {
         } else {
           // microWakeWord path (also covers stop-word-only standby).
           // The Worker loads its own TFLite runtime + models; we don't
-          // touch them on the main thread.
-          const cutoffs = {};
-          for (const name of wakeModels) cutoffs[name] = this.getThresholdForModel(name);
+          // touch them on the main thread. Let the worker compute cutoffs
+          // after it has loaded each model's JSON manifest; this matters
+          // for custom MWW models that are unknown to the main bundle.
           this._log.log('wake-word', `Spawning MWW worker for: ${wakeModels.join(', ') || '(stop standby only)'}`);
           this._inference = await WorkerProxyBackend.create({
             engine: 'mww',
             models: wakeModels,
-            cutoffs,
             energyGateEnabled: this._isNoiseGateEnabled(),
             sensitivityLabel: this._getSensitivityLabel(),
             log: this._log,
@@ -480,17 +479,19 @@ export class WakeWordManager {
           this._loadedModelsKey = modelsKey;
 
           if (wakeModels.length > 0) {
-            const configSummary = wakeModels.map((n) => `${n}(c=${cutoffs[n].toFixed(2)})`).join(', ');
+            const configs = this._inference._keywords;
+            const configSummary = configs.map((kw) => `${kw.name}(c=${kw.cutoff.toFixed(2)})`).join(', ');
             this._log.log('wake-word', `MWW worker ready: ${configSummary}`);
           } else {
             this._log.log('wake-word', 'MWW worker ready (no wake models loaded - stop-word standby)');
           }
         }
       } else if (wakeModels.length > 0) {
-        this._inference.updateThresholds(
-          wakeModels.map((name) => ({ name, threshold: this.getThresholdForModel(name) })),
-        );
+        const updates = this.getEngine() === 'mww'
+          ? wakeModels.map((name) => ({ name }))
+          : wakeModels.map((name) => ({ name, threshold: this.getThresholdForModel(name) }));
         this._inference.updateEnergyThresholds(this._getSensitivityLabel());
+        this._inference.updateThresholds(updates);
         this._inference.reset();
       }
 
@@ -1324,10 +1325,11 @@ export class WakeWordManager {
     this._sampleBufLen = 0;
     this._frameQueue.length = 0;
     this._processing = false;
-    this._inference.updateThresholds(
-      activeModels.map((name) => ({ name, threshold: this.getThresholdForModel(name) })),
-    );
     this._inference.updateEnergyThresholds(this._getSensitivityLabel());
+    const updates = this.getEngine() === 'mww'
+      ? activeModels.map((name) => ({ name }))
+      : activeModels.map((name) => ({ name, threshold: this.getThresholdForModel(name) }));
+    this._inference.updateThresholds(updates);
     this._inference.reset();
     this._active = true;
   }
@@ -1382,10 +1384,11 @@ export class WakeWordManager {
     if ((thresholdChanged || noiseGateChanged) && !modelChanged && this._active && this._inference) {
       if (thresholdChanged) {
         const activeModels = this.getActiveModels();
-        this._inference.updateThresholds(
-          activeModels.map((name) => ({ name, threshold: this.getThresholdForModel(name) })),
-        );
         this._inference.updateEnergyThresholds(this._getSensitivityLabel());
+        const updates = this.getEngine() === 'mww'
+          ? activeModels.map((name) => ({ name }))
+          : activeModels.map((name) => ({ name, threshold: this.getThresholdForModel(name) }));
+        this._inference.updateThresholds(updates);
       }
       if (noiseGateChanged) {
         this._inference.setEnergyGateEnabled(noiseGate);

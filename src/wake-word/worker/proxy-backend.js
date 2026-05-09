@@ -90,7 +90,7 @@ export class WorkerProxyBackend {
       }
     }
     for (const name of activeNames) proxy._activeKeywords.add(name);
-    await proxy._send('init', {
+    const initResult = await proxy._send('init', {
       engine: options.engine,
       models: allNames,
       activeKeywords: activeNames,
@@ -99,6 +99,11 @@ export class WorkerProxyBackend {
       sensitivityLabel: options.sensitivityLabel || 'Moderately sensitive',
       enableTimings: options.enableTimings === true,
     }, INIT_TIMEOUT_MS);
+    if (initResult?.cutoffs) {
+      for (const [name, cutoff] of Object.entries(initResult.cutoffs)) {
+        if (typeof cutoff === 'number') proxy._cutoffs[name] = cutoff;
+      }
+    }
     return proxy;
   }
 
@@ -197,7 +202,12 @@ export class WorkerProxyBackend {
         if (t && typeof t.threshold === 'number') this._cutoffs[t.name] = t.threshold;
       }
     }
-    this._send('updateThresholds', thresholds).catch(() => {});
+    this._send('updateThresholds', thresholds).then((updates) => {
+      if (!Array.isArray(updates)) return;
+      for (const t of updates) {
+        if (t && typeof t.threshold === 'number') this._cutoffs[t.name] = t.threshold;
+      }
+    }).catch(() => {});
   }
   updateEnergyThresholds(label) { this._send('updateEnergyThresholds', label).catch(() => {}); }
   setEnergyGateEnabled(enabled) { this._send('setEnergyGateEnabled', enabled).catch(() => {}); }

@@ -35,6 +35,7 @@ let backend = null;
 // Engine kind ('mww' | 'oww') of the current backend, used to branch
 // on MWW-only paths like dynamic stop-word loading.
 let engineKind = null;
+let currentSensitivityLabel = 'Moderately sensitive';
 // Per-instance microWakeWord runtime + model cache.  Only used when
 // engine === 'mww'.  We keep them on the worker scope so subsequent
 // keyword loads can reuse the same TFLite runtime.
@@ -51,6 +52,18 @@ const workerLogger = {
     self.postMessage({ type: 'log', category, message, level: 'error' });
   },
 };
+
+const SENSITIVITY_MARGIN_FACTORS = {
+  'Slightly sensitive': 0.5,
+  'Moderately sensitive': 1.0,
+  'Very sensitive': 2.0,
+};
+const STOP_SENSITIVITY_FACTORS = {
+  'Slightly sensitive': 0.8,
+  'Moderately sensitive': 1.0,
+  'Very sensitive': 1.2,
+};
+const DEFAULT_CUTOFF = 0.90;
 
 /**
  * Build the MWW keywordConfigs array (same shape WakeWordManager builds
@@ -78,7 +91,7 @@ async function loadMwwKeywordConfigs(modelNames, sensitivityLabel, cutoffOverrid
     return {
       runner: mwwRunners.get(name),
       name,
-      cutoff: cutoffOverrides?.[name] ?? params.cutoff,
+      cutoff: cutoffOverrides?.[name] ?? getMwwThreshold(name, params, sensitivityLabel),
       slidingWindow: params.slidingWindow,
       stepSize: params.stepSize,
       inputScale: params.inputScale,
@@ -106,8 +119,9 @@ async function init({
   // normal listening), it sends a strict subset and we deactivate the
   // rest immediately after construction.
   const active = new Set(activeKeywords || models);
+  let keywordConfigs = [];
   if (engine === 'oww') {
-    const keywordConfigs = models.map((name) => ({
+    keywordConfigs = models.map((name) => ({
       name,
       cutoff: cutoffs?.[name],
     }));
@@ -124,7 +138,7 @@ async function init({
   } else if (engine === 'mww') {
     // MWW only loads what's active.  Stop-word standby loading is
     // handled lazily by the `addKeyword` RPC (resolveMwwAddKeyword).
-    const keywordConfigs = await loadMwwKeywordConfigs(
+    keywordConfigs = await loadMwwKeywordConfigs(
       [...active], sensitivityLabel, cutoffs,
     );
     backend = await MicroWakeWordInference.create(
@@ -136,8 +150,14 @@ async function init({
   } else {
     throw new Error(`Unknown engine: ${engine}`);
   }
+  currentSensitivityLabel = sensitivityLabel || 'Moderately sensitive';
   engineKind = engine;
-  return { engine, models, active: [...active] };
+  return {
+    engine,
+    models,
+    active: [...active],
+    cutoffs: Object.fromEntries(keywordConfigs.map((cfg) => [cfg.name, cfg.cutoff])),
+  };
 }
 
 /**
@@ -156,12 +176,22 @@ async function resolveMwwAddKeyword(payload) {
   return {
     runner: mwwRunners.get(payload.name),
     name: payload.name,
-    cutoff: typeof payload.cutoff === 'number' ? payload.cutoff : params.cutoff,
+    cutoff: typeof payload.cutoff === 'number'
+      ? payload.cutoff
+      : getMwwThreshold(payload.name, params, currentSensitivityLabel),
     slidingWindow: params.slidingWindow,
     stepSize: params.stepSize,
     inputScale: params.inputScale,
     inputZeroPoint: params.inputZeroPoint,
   };
+}
+
+function getMwwThreshold(name, params, sensitivityLabel) {
+  const baseCutoff = params.cutoff ?? DEFAULT_CUTOFF;
+  const table = name === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
+  const factor = table[sensitivityLabel] ?? 1.0;
+  const effective = 1 - (1 - baseCutoff) * factor;
+  return Math.max(0.1, Math.min(effective, 0.99));
 }
 
 /** Async dispatch on the active backend.  Returns whatever the backend
@@ -185,8 +215,24 @@ async function dispatch(type, payload) {
       return backend.addKeyword(payload);
     }
     case 'removeKeyword': return backend.removeKeyword(payload);
-    case 'updateThresholds': return backend.updateThresholds(payload);
-    case 'updateEnergyThresholds': return backend.updateEnergyThresholds(payload);
+    case 'updateThresholds': {
+      if (engineKind === 'mww' && Array.isArray(payload)) {
+        const updates = payload.map((u) => {
+          if (typeof u?.threshold === 'number') return u;
+          const params = getMicroModelParams(u.name);
+          return {
+            name: u.name,
+            threshold: getMwwThreshold(u.name, params, currentSensitivityLabel),
+          };
+        });
+        backend.updateThresholds(updates);
+        return updates;
+      }
+      return backend.updateThresholds(payload);
+    }
+    case 'updateEnergyThresholds':
+      currentSensitivityLabel = payload || 'Moderately sensitive';
+      return backend.updateEnergyThresholds(payload);
     case 'setEnergyGateEnabled': return backend.setEnergyGateEnabled(payload);
     case 'reset': return backend.reset();
     case 'getLatestSmoothedProbability':

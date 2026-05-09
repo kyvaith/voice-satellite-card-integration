@@ -29,7 +29,7 @@ import { buildScreensaverPreSchema, buildScreensaverPostSchema, screensaverFkSch
 import { openMediaPicker, deriveParentMediaId } from './media-picker-dialog.js';
 import { WakeWordTestSession } from '../wake-word/wake-word-test-session.js';
 import { resolveDspForMode } from '../audio/dsp-config.js';
-import { getMicroModelParams } from '../wake-word/micro-models.js';
+import { getMicroModelParams, loadMicroModelParams } from '../wake-word/micro-models.js';
 import { getSelectOptions, getSelectAttribute, getSelectState, getSwitchState } from '../shared/satellite-state.js';
 import { DiagnosticsManager } from '../diagnostics';
 import { buildMarkdownReport } from '../diagnostics/report.js';
@@ -1842,7 +1842,9 @@ class VoiceSatellitePanel extends HTMLElement {
     this._testerSelectedModel = modelSelect.value;
     this._testerSensitivity = sensitivitySelect?.value || 'Moderately sensitive';
 
-    const updateThresholdForModel = () => {
+    let thresholdUpdateSeq = 0;
+    const updateThresholdForModel = async () => {
+      const seq = ++thresholdUpdateSeq;
       const engine = engineSelect?.value || 'mww';
       const name = modelSelect.value;
       const sensitivity = sensitivitySelect?.value || 'Moderately sensitive';
@@ -1862,7 +1864,14 @@ class VoiceSatellitePanel extends HTMLElement {
         const offset = offsets[sensitivity] ?? 0;
         this._testerThreshold = Math.max(0.1, Math.min(base + offset, 0.99));
       } else {
-        const baseCutoff = getMicroModelParams(name)?.cutoff ?? 0.85;
+        let params = getMicroModelParams(name);
+        try {
+          params = await loadMicroModelParams(name);
+        } catch (_) {
+          // Keep the synchronous fallback if the manifest cannot be fetched.
+        }
+        if (seq !== thresholdUpdateSeq) return;
+        const baseCutoff = params?.cutoff ?? 0.85;
         const factors = name === 'stop' ? STOP_SENSITIVITY_FACTORS : SENSITIVITY_MARGIN_FACTORS;
         const factor = factors[sensitivity] ?? 1.0;
         this._testerThreshold = Math.max(0.1, Math.min(1 - (1 - baseCutoff) * factor, 0.99));
@@ -1886,7 +1895,7 @@ class VoiceSatellitePanel extends HTMLElement {
       // needs different model files loaded - switchModel can't bridge
       // engines mid-session).
       populate();
-      updateThresholdForModel();
+      await updateThresholdForModel();
       if (this._testerSession?.running) {
         await this._stopTesterSession();
         await this._startTesterSession();
@@ -1894,7 +1903,7 @@ class VoiceSatellitePanel extends HTMLElement {
     });
 
     modelSelect.addEventListener('change', async () => {
-      updateThresholdForModel();
+      await updateThresholdForModel();
       // If a tester session is running, switch models on the fly so the
       // user doesn't have to Stop and Start to compare two models.
       if (this._testerSession?.running) {
@@ -1908,8 +1917,8 @@ class VoiceSatellitePanel extends HTMLElement {
       }
     });
 
-    sensitivitySelect?.addEventListener('change', () => {
-      updateThresholdForModel();
+    sensitivitySelect?.addEventListener('change', async () => {
+      await updateThresholdForModel();
       if (this._testerSession?.running) {
         this._testerSession.setThreshold(this._testerThreshold);
       }
@@ -1919,6 +1928,7 @@ class VoiceSatellitePanel extends HTMLElement {
       if (this._testerSession?.running) {
         await this._stopTesterSession();
       } else {
+        await updateThresholdForModel();
         await this._startTesterSession();
       }
     });

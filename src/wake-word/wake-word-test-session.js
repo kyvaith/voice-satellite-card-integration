@@ -6,18 +6,10 @@
  * of the main wake word engine - works whether the engine is dormant,
  * running with on-device wake word, or using HA-side wake word.
  *
- * Uses an *isolated* model runner (createIsolatedModelRunner) so it can
- * run in parallel with the main engine without sharing - and corrupting -
- * the cached runner's stateful VarHandleOps.
+ * Uses its own worker-backed inference session so it can run independently
+ * of the main wake-word engine.
  */
 
-import {
-  loadTFLite,
-  createIsolatedModelRunner,
-  getMicroModelParams,
-} from './micro-models.js';
-import { MicroWakeWordInference } from './micro-inference.js';
-import { OwwBackend } from './oww/backend.js';
 import { WorkerProxyBackend } from './worker/proxy-backend.js';
 
 const CHUNK_SIZE = 1280; // 80ms @ 16 kHz
@@ -257,10 +249,13 @@ export class WakeWordTestSession {
   setThreshold(threshold) {
     this._threshold = typeof threshold === 'number' ? threshold : null;
     if (!this._running || !this._inference || !this._modelName) return;
-    this._inference.updateThresholds([{
-      name: this._modelName,
-      threshold: this._threshold ?? getMicroModelParams(this._modelName).cutoff,
-    }]);
+    const update = { name: this._modelName };
+    if (typeof this._threshold === 'number') {
+      update.threshold = this._threshold;
+    } else if (this._engine === 'oww') {
+      update.threshold = 0.5;
+    }
+    this._inference.updateThresholds([update]);
   }
 
   // ─── Internal setup ─────────────────────────────────────────────────
@@ -383,11 +378,16 @@ export class WakeWordTestSession {
     // the main thread (so the chart rAF stays smooth) and gives this
     // session its own isolated backend state independent of the live
     // engine's worker.
-    const cutoff = this._threshold ?? (this._engine === 'oww' ? 0.5 : getMicroModelParams(this._modelName)?.cutoff);
+    const cutoffs = {};
+    if (typeof this._threshold === 'number') {
+      cutoffs[this._modelName] = this._threshold;
+    } else if (this._engine === 'oww') {
+      cutoffs[this._modelName] = 0.5;
+    }
     this._inference = await WorkerProxyBackend.create({
       engine: this._engine === 'oww' ? 'oww' : 'mww',
       models: [this._modelName],
-      cutoffs: { [this._modelName]: cutoff },
+      cutoffs,
       energyGateEnabled: this._energyGateEnabled,
       sensitivityLabel: this._sensitivityLabel,
       enableTimings: true,
