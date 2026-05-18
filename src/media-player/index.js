@@ -566,6 +566,20 @@ export class MediaPlayerManager {
       const { default: Hls } = await import(
         /* webpackChunkName: "hls" */ 'hls.js/dist/hls.light.min.js'
       );
+
+      // The dynamic import is async, which means a second _play() call
+      // could have run _cleanup() while we were waiting. If `this._audio`
+      // no longer points at the video element we were handed, this call
+      // has been superseded - abandon silently so we don't leak a parallel
+      // hls.js instance attached to a discarded <video>.
+      if (this._audio !== video) {
+        this._log.log(
+          'media-player',
+          'hls.js attach skipped: superseded by a newer _play before import resolved',
+        );
+        return;
+      }
+
       const supported = Hls.isSupported();
       this._log.log(
         'media-player',
