@@ -331,7 +331,10 @@ export class TtsManager {
 
     this._log.log('tts', `Audio duration applied - setting completion timer: ${baseLog}`);
 
-    // Replace the 30s safety timeout with a duration-based one (+ 2s buffer)
+    // Replace the 30s safety timeout with one based on server-measured
+    // duration plus a 2s buffer. The buffer covers playback-start latency
+    // on the remote (network fetch + buffering), which can be noticeable
+    // on long TTS responses.
     if (this._endTimer) {
       clearTimeout(this._endTimer);
     }
@@ -349,6 +352,15 @@ export class TtsManager {
    */
   checkRemotePlayback(hass) {
     if (!this._playing || !this._remoteTarget) return;
+
+    // Once the server-measured duration is known, the duration-based
+    // timer in setAudioDuration() is the source of truth for completion.
+    // Entity-state polling is unreliable on speakers that have other
+    // media active: announce-mode may resume the user's content with the
+    // same media_content_id (firing path 2 prematurely), or briefly blip
+    // through 'paused'/'idle' (firing path 1 prematurely). The duration
+    // timer is unaffected by either.
+    if (this._serverDuration) return;
 
     const entity = hass.states?.[this._remoteTarget];
     if (!entity) return;
