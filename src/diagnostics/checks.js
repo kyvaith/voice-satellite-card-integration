@@ -328,7 +328,7 @@ export const CLIENT_CHECKS = [
       if (!entityId) return { status: 'skip' };
       const mode = getSelectState(hass, entityId, 'wake_word_detection', '');
       if (mode !== WAKE_WORD_DETECTION_OWW) {
-        return { status: 'skip', detail: `Wake word detection is "${mode || 'unknown'}" — WebGPU is only required for openWakeWord.` };
+        return { status: 'skip', detail: `This check only applies when wake word detection is "${WAKE_WORD_DETECTION_OWW}". Active mode is "${mode || 'unknown'}".` };
       }
       const probe = await probeWebGpu();
       if (probe.ok) return { status: 'pass', detail: `WebGPU adapter present (${probe.desc}).` };
@@ -367,7 +367,7 @@ export const CLIENT_CHECKS = [
       if (!entityId) return { status: 'skip' };
       const mode = getSelectState(hass, entityId, 'wake_word_detection', '');
       if (mode !== WAKE_WORD_DETECTION_VWW) {
-        return { status: 'skip', detail: `Wake word detection is "${mode || 'unknown'}" — WebGPU is only required for vsWakeWord.` };
+        return { status: 'skip', detail: `This check only applies when wake word detection is "${WAKE_WORD_DETECTION_VWW}". Active mode is "${mode || 'unknown'}".` };
       }
       const probe = await probeWebGpu();
       if (probe.ok) return { status: 'pass', detail: `WebGPU adapter present (${probe.desc}).` };
