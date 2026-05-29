@@ -206,7 +206,11 @@ export class WorkerProxyBackend {
     if (typeof cfg.cutoff === 'number') this._cutoffs[cfg.name] = cfg.cutoff;
     // Strip non-clonable references (e.g. MWW runner) before sending.
     // The Worker resolves the runner from its own model cache by name.
-    this._send('addKeyword', { name: cfg.name, cutoff: cfg.cutoff }).catch(() => {});
+    return this._send('addKeyword', { name: cfg.name, cutoff: cfg.cutoff }, INIT_TIMEOUT_MS)
+      .catch((e) => {
+        this._log?.error?.('wake-word', `Failed to add keyword ${cfg.name}: ${e.message || e}`);
+        return null;
+      });
   }
   removeKeyword(name) {
     this._activeKeywords.delete(name);

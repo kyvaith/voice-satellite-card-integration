@@ -14,6 +14,37 @@ import { buildMediaUrl, playMediaUrl } from '../audio/media-playback.js';
 import { attachDoubleTap } from '../shared/double-tap.js';
 import { Timing } from '../constants.js';
 
+let hlsLoaderPromise = null;
+
+function loadHlsLight() {
+  const existing = globalThis.Hls;
+  if (existing) return Promise.resolve(existing);
+  if (hlsLoaderPromise) return hlsLoaderPromise;
+
+  hlsLoaderPromise = new Promise((resolve, reject) => {
+    const src = `/voice_satellite/vendor/hls.light.min.js?v=${__VERSION__}`;
+    const existingScript = document.querySelector(`script[data-vs-hls="${__VERSION__}"]`);
+    if (existingScript) {
+      existingScript.addEventListener('load', () => resolve(globalThis.Hls), { once: true });
+      existingScript.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.vsHls = __VERSION__;
+    script.onload = () => {
+      if (globalThis.Hls) resolve(globalThis.Hls);
+      else reject(new Error('hls.js loaded but window.Hls was not defined'));
+    };
+    script.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(script);
+  });
+
+  return hlsLoaderPromise;
+}
+
 export class MediaPlayerManager {
   constructor(card) {
     this._card = card;
@@ -563,19 +594,15 @@ export class MediaPlayerManager {
   async _attachHls(video, url, onStart, onError) {
     const t0 = performance.now();
     try {
-      const { default: Hls } = await import(
-        /* webpackChunkName: "hls" */ 'hls.js/dist/hls.light.min.js'
-      );
+      const Hls = await loadHlsLight();
 
-      // The dynamic import is async, which means a second _play() call
-      // could have run _cleanup() while we were waiting. If `this._audio`
-      // no longer points at the video element we were handed, this call
-      // has been superseded - abandon silently so we don't leak a parallel
-      // hls.js instance attached to a discarded <video>.
+      // If a second _play() call ran _cleanup() before HLS attach starts,
+      // abandon silently so we don't leak a parallel hls.js instance
+      // attached to a discarded <video>.
       if (this._audio !== video) {
         this._log.log(
           'media-player',
-          'hls.js attach skipped: superseded by a newer _play before import resolved',
+          'hls.js attach skipped: superseded by a newer _play',
         );
         return;
       }

@@ -29,12 +29,14 @@ const baseConfig = {
       __VERSION__: JSON.stringify(pkg.version),
     }),
   ],
-  // Dynamic import() chunks (e.g. wake-word) are loaded from the same
-  // static path as the main card JS (/voice_satellite/).
+  // Dynamic import() chunks (e.g. wake-word, skins) are loaded from the
+  // same static path as the main card JS (/voice_satellite/). Keep
+  // physical filenames stable because HACS does not remove old files on
+  // update.
   output: {
     publicPath: '/voice_satellite/',
     clean: {
-      keep: /^fonts\//,
+      keep: /^(fonts|vendor)\//,
     },
   },
   // Pin chunk names to the file path (e.g. src_wake-word_worker_inference-worker_js)

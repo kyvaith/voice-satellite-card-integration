@@ -1200,6 +1200,7 @@ export class WakeWordManager {
         // keyword (or lazily loads it if start() ran with stop-word
         // off and the user enabled it mid-session).
         if (!this._stopMicroConfig) {
+          await loadVwwModelParams(stopName).catch(() => null);
           this._stopMicroConfig = {
             name: stopName,
             cutoff: this.getThresholdForModel(stopName),
@@ -1209,7 +1210,7 @@ export class WakeWordManager {
             `VWW stop classifier registered: ${stopName}(c=${this._stopMicroConfig.cutoff.toFixed(3)})`,
           );
         }
-        this._inference.addKeyword(this._stopMicroConfig);
+        await this._inference.addKeyword(this._stopMicroConfig);
         this._suspendedKeywords = this._inference._keywords
           .filter((k) => k.name !== stopName)
           .map((k) => ({ name: k.name, cutoff: k.cutoff }));
@@ -1258,7 +1259,7 @@ export class WakeWordManager {
         this._log.log('stop-word', 'Stop model already loaded (cached)');
       }
 
-      this._inference.addKeyword(this._stopMicroConfig);
+      await this._inference.addKeyword(this._stopMicroConfig);
 
       // stopOnly is always true here (forced above for all engines).
       // Suspend every wake-word keyword so only the stop classifier

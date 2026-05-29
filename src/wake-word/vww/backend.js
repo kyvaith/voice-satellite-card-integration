@@ -738,6 +738,8 @@ export class VwwBackend {
           ?? entry.manifest?.input?.shape?.[1]
           ?? 9;
         await this._inference.addKeyword(cfg.name, entry.compiled, tEmb);
+      } else if (entry.architecture === 'ctc') {
+        await this._inference.addKeyword(cfg.name, entry.compiled, entry.ctcConfig);
       } else {
         await this._inference.addKeyword(cfg.name, entry.compiled);
       }
