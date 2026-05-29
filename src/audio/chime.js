@@ -5,11 +5,20 @@
  * Each chime is pre-cached as an Audio element on first use for
  * instant playback with no synthesis overhead.
  *
- * When TTS output is routed to a remote media player, chimes are
- * played on that device via media_player.play_media.
+ * Routing rules when TTS output is a remote media_player:
+ *   - Announcement mode (default): chime fires on the remote via
+ *     media_player.play_media with announce=true, matching the TTS
+ *     path so both ride the speaker's announce-mode handling.
+ *   - Normal Playback mode: chime also fires on the remote, but with
+ *     announce=false. TtsManager.playChime captures a snapshot of the
+ *     remote BEFORE this fires and schedules a deferred restore that
+ *     runs after the last activity in the interaction (typically the
+ *     done chime), so the user's prior music can be resumed even on
+ *     speakers that don't honor the announce flag.
  */
 
 import { buildMediaUrl } from './media-playback.js';
+import { getSelectState } from '../shared/satellite-state.js';
 
 const SOUNDS_BASE = '/voice_satellite/sounds';
 
@@ -124,16 +133,16 @@ export function getChimeDuration(chime) {
  * Play a chime on a remote media player via media_player.play_media.
  * Fire-and-forget - errors are logged but don't block.
  */
-function playChimeRemote(card, url, log) {
+function playChimeRemote(card, url, log, { announce = true } = {}) {
   const entityId = card.ttsTarget;
   if (!entityId || !card.hass) return;
   const fullUrl = buildMediaUrl(url);
-  log?.log('chime', `Playing chime on remote: ${entityId}`);
+  log?.log('chime', `Playing chime on remote: ${entityId} announce=${announce}`);
   card.hass.callService('media_player', 'play_media', {
     entity_id: entityId,
     media_content_id: fullUrl,
     media_content_type: 'music',
-    announce: true,
+    announce,
   }).catch((e) => {
     log?.error('chime', `Remote chime failed: ${e?.message || e}`);
   });
@@ -141,7 +150,11 @@ function playChimeRemote(card, url, log) {
 
 /**
  * Play a chime sound file. Routes to the remote media player when
- * TTS output is configured.
+ * TTS output is configured, with `announce` matching the remote TTS
+ * mode (true for 'announcement', false for 'normal_playback'). For
+ * 'normal_playback', TtsManager.playChime has already captured the
+ * remote's pre-chime media state so the deferred restore can put it
+ * back after the interaction.
  *
  * Reuses the cached Audio element directly (no cloneNode) to avoid
  * orphaned HTTP connections that exhaust the browser's connection pool.
@@ -153,7 +166,13 @@ function playChimeRemote(card, url, log) {
 export function playChime(card, chime, log) {
   try {
     if (card.ttsTarget) {
-      playChimeRemote(card, chime.url, log);
+      const mode = getSelectState(
+        card.hass,
+        card.config?.satellite_entity,
+        'tts_output_mode_remote',
+        'announcement',
+      );
+      playChimeRemote(card, chime.url, log, { announce: mode !== 'normal_playback' });
       return;
     }
     const audio = getCachedAudio(chime.url);

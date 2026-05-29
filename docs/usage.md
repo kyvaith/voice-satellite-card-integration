@@ -283,6 +283,8 @@ Each satellite automatically exposes a `media_player` entity in Home Assistant, 
 - **Supports `media_player.play_media`** for audio, local video files, and live camera streams
 - **Supports browsing** the HA media library, including the Cameras source
 
+> **Routing TTS to a different speaker.** This section covers the satellite's own `media_player` entity (the tablet itself). To route the assistant's spoken response to a different speaker, see [TTS Output](tts-output.md).
+
 ### Audio
 
 ```yaml

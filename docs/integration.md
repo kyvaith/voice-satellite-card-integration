@@ -27,7 +27,8 @@ Each satellite device exposes configuration entities on its device page (**Setti
 | **Session duration** | Select | Controls how long conversation context is retained between wake word activations. After the selected duration elapses without interaction, the next wake word starts a fresh conversation. Options: "Persistent" (default - never expires, matching physical Voice PE satellite behavior), 5 minutes, 10 minutes, 15 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, or "Isolated" (every wake word activation starts completely fresh). Multi-turn exchanges within a single session always share context regardless of this setting |
 | **Mute** | Switch | Mute/unmute the satellite - when muted, wake word detection is paused |
 | **Screensaver active** | Binary sensor | Sensor showing whether the screensaver overlay is currently displayed. (Screensaver settings live in the sidebar panel - see [configuration.md](configuration.md#screensaver)) |
-| **TTS Output** | Select | Where to play TTS audio: "Browser" (default) plays audio locally, or select any `media_player` entity to route TTS to an external speaker |
+| **TTS Output** | Select | Where to play TTS audio: "Browser" (default) plays audio locally, or select any `media_player` entity to route TTS to an external speaker. See [TTS Output](tts-output.md) for the full explanation |
+| **TTS Output behavior (remote)** | Select | Only used when **TTS Output** is a remote `media_player`. Picks how the satellite delivers audio (wake chime, TTS, done chime) to that speaker and what happens to any media the speaker was already playing. See [TTS Output: Remote TTS Output behavior](tts-output.md#remote-tts-output-behavior) for the full explanation and guidance on which option fits your speaker |
 | **Wake sound** | Switch | Enable/disable chime sounds (wake, done, error) |
 | **Stop word interruption** | Switch | Opt-in on-device `stop` keyword detection for interruptible states such as timer alerts, TTS playback, and announcements. Disabled by default to avoid extra CPU/memory use on slower devices |
 | **Wake word 1** | Select | Primary wake word model. The dropdown lists models for the active engine (microWakeWord or openWakeWord) and switches automatically when the engine changes. Custom MWW `.tflite` files are auto-discovered from `config/voice_satellite/models/`; custom OWW `.onnx` files are auto-discovered from `config/voice_satellite/models/openwakeword/`. See [Built-in Wake Words](wake-word.md#built-in-wake-words) |
@@ -76,6 +77,7 @@ The satellite entity exposes the following attributes for use in templates and a
 | `wake_sound` | boolean | Current wake sound switch state |
 | `stop_word` | boolean | Whether opt-in stop word interruption is enabled |
 | `tts_target` | string | Entity ID of the selected TTS output media player (empty string when set to "Browser") |
+| `tts_output_mode_remote` | string | Current TTS Output behavior for remote targets: `announcement` (default) or `normal_playback`. See [TTS Output: Remote TTS Output behavior](tts-output.md#remote-tts-output-behavior) |
 | `announcement_display_duration` | integer | Configured announcement display duration in seconds |
 | `wake_word_detection` | string | Current wake word detection mode: "On Device (microWakeWord)", "On Device (openWakeWord)", "Home Assistant", or "Disabled" |
 | `wake_word_model` | string | Wake word 1 model name (e.g., `ok_nabu`) |

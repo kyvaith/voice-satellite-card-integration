@@ -5,9 +5,10 @@
  * sound files, and streaming TTS early-start support.
  */
 
-import { playChime as playChimeSound, CHIME_WAKE, CHIME_ERROR, CHIME_DONE } from '../audio/chime.js';
+import { playChime as playChimeSound, CHIME_WAKE, CHIME_ERROR, CHIME_DONE, getChimeDuration } from '../audio/chime.js';
 import { buildMediaUrl } from '../audio/media-playback.js';
-import { playRemote, stopRemote } from './comms.js';
+import { playRemote, restoreRemote, stopRemote } from './comms.js';
+import { getSelectState } from '../shared/satellite-state.js';
 import { Timing } from '../constants.js';
 
 /** Safety ceiling so the UI never gets stuck if remote state monitoring fails */
@@ -51,6 +52,17 @@ export class TtsManager {
     this._remoteSawPlaying = false;
     this._remoteInitialState = null;
     this._remoteInitialContentId = null;
+
+    // 'normal_playback' mode: snapshot of prior media to restore after the
+    // satellite is done with the remote. Captured at the FIRST remote write
+    // of an interaction (wake chime, or TTS if no chime preceded it) and
+    // consumed by the deferred restore timer. Null when no interaction is
+    // active.
+    this._resumeSnapshot = null;
+    // Deferred restore timer. Each remote write (chime or TTS) cancels and
+    // re-schedules. The last activity in the interaction (typically the
+    // done chime) wins, and restore fires after that chime ends.
+    this._restoreTimer = null;
 
     // TTS URL from the current play() call - used to correlate tts-audio-duration events
     this._ttsUrl = null;
@@ -99,7 +111,31 @@ export class TtsManager {
       const remoteEntity = this._card.hass?.states?.[ttsTarget];
       this._remoteInitialState = remoteEntity?.state;
       this._remoteInitialContentId = remoteEntity?.attributes?.media_content_id || null;
-      playRemote(this._card, mediaId || url).catch(() => {
+
+      // 'normal_playback' mode skips the announce flag and explicitly
+      // restores prior content after TTS. Used for speakers (e.g. Google
+      // Cast) that ignore announce, leaving the user's music never
+      // resumed. Snapshot is only captured when the remote was actively
+      // playing user content - if it was idle or already on a TTS URL
+      // there's nothing meaningful to restore.
+      const useAnnounce = !this._isNormalPlaybackMode();
+      this._log.log(
+        'tts',
+        `Remote start: target=${ttsTarget} useAnnounce=${useAnnounce}`
+          + ` initialState=${this._remoteInitialState}`
+          + ` initialContentId=${this._remoteInitialContentId}`,
+      );
+      // Cancel any deferred restore - we're firing more remote activity.
+      // A new restore is scheduled by _onComplete (or a subsequent chime).
+      this._cancelRestore();
+      // In normal_playback mode, snapshot the remote unless a preceding
+      // chime already captured one. Only capture if music was actively
+      // playing - skip silent/idle/paused states.
+      if (!useAnnounce && !this._resumeSnapshot) {
+        this._captureRemoteSnapshot();
+      }
+
+      playRemote(this._card, mediaId || url, { announce: useAnnounce }).catch(() => {
         this._log.log('tts', 'Remote play service call failed - forcing completion');
         this._onComplete();
       });
@@ -219,6 +255,16 @@ export class TtsManager {
   }
 
   stop() {
+    // Decide whether to preserve the snapshot BEFORE clearing _remoteTarget.
+    // In normal_playback mode with an active snapshot the user's music must
+    // still be restored on cancellation (stop word, double-tap, etc.) - if
+    // we cleared it and called stopRemote, the speaker would just go silent.
+    // A trailing done chime (which every cancellation path fires) will pick
+    // up the snapshot and reschedule for after itself.
+    const preserveSnapshot = this._resumeSnapshot
+      && this._card.ttsTarget
+      && this._isNormalPlaybackMode();
+
     this._playing = false;
     this._remoteTarget = null;
     this._remoteSawPlaying = false;
@@ -237,7 +283,18 @@ export class TtsManager {
     this._card.analyser.detachAudio();
     this._releaseAudio();
 
-    stopRemote(this._card);
+    if (preserveSnapshot) {
+      // Schedule deferred restore. The trailing done chime (within ~ms)
+      // cancels and reschedules for after itself. If no chime follows,
+      // the safety timer below restores the music and naturally replaces
+      // whatever was playing on the remote - no stopRemote needed.
+      this._scheduleRestore(1);
+    } else {
+      this._cancelRestore();
+      this._resumeSnapshot = null;
+      stopRemote(this._card);
+    }
+
     this._card.mediaPlayer.notifyAudioEnd('tts');
   }
 
@@ -269,12 +326,112 @@ export class TtsManager {
    */
   playChime(type) {
     const pattern = CHIME_MAP[type] || CHIME_DONE;
-    this._log.log('chime', `Playing ${type} chime${this._card.ttsTarget ? ' (remote)' : ' (local)'}`);
+    this._log.log('chime', `Playing ${type} chime`);
     this._card.mediaPlayer.notifyAudioStart('chime');
+
+    // 'normal_playback' mode + remote target: capture the snapshot before
+    // the chime poisons the remote's media_content_id (so the wake chime
+    // doesn't wipe the user's music URL from view). Subsequent chimes in
+    // the same interaction reuse the snapshot. Cancel any previously
+    // scheduled restore - we're adding more remote activity, so the
+    // restore must be re-scheduled for after this chime ends.
+    if (this._card.ttsTarget && this._isNormalPlaybackMode()) {
+      this._cancelRestore();
+      if (!this._resumeSnapshot) {
+        this._captureRemoteSnapshot();
+      }
+    }
+
     playChimeSound(this._card, pattern, this._log);
     setTimeout(() => {
       this._card.mediaPlayer.notifyAudioEnd('chime');
     }, (pattern.duration || 0.3) * 1000);
+
+    // Only end-of-interaction chimes (done, error) schedule restore.
+    // The wake chime is the START of the interaction - scheduling a
+    // restore here would fire during STT/intent and briefly resume the
+    // user's music before TTS kills it again. _onComplete handles the
+    // post-TTS case (and a trailing done chime reschedules to fire
+    // after itself).
+    const isEndOfInteraction = type === 'done' || type === 'error';
+    if (isEndOfInteraction
+        && this._resumeSnapshot
+        && this._card.ttsTarget
+        && this._isNormalPlaybackMode()) {
+      this._scheduleRestore(getChimeDuration(pattern));
+    }
+  }
+
+  /** True if remote TTS output mode is 'normal_playback'. */
+  _isNormalPlaybackMode() {
+    const mode = getSelectState(
+      this._card.hass,
+      this._card.config?.satellite_entity,
+      'tts_output_mode_remote',
+      'announcement',
+    );
+    return mode === 'normal_playback';
+  }
+
+  /**
+   * Snapshot the remote target's current media so it can be restored
+   * after the satellite is done. No-op if the remote isn't actively
+   * playing user content.
+   */
+  _captureRemoteSnapshot() {
+    const target = this._card.ttsTarget;
+    if (!target) return;
+    const remote = this._card.hass?.states?.[target];
+    if (!remote || remote.state !== 'playing' || !remote.attributes?.media_content_id) {
+      return;
+    }
+    const attrs = remote.attributes;
+    const reportedAt = attrs.media_position_updated_at
+      ? Date.parse(attrs.media_position_updated_at)
+      : null;
+    const elapsed = reportedAt && Number.isFinite(reportedAt)
+      ? Math.max(0, (Date.now() - reportedAt) / 1000)
+      : 0;
+    const position = (Number(attrs.media_position) || 0) + elapsed;
+    this._resumeSnapshot = {
+      id: attrs.media_content_id,
+      type: attrs.media_content_type || 'music',
+      position,
+      duration: Number(attrs.media_duration) || null,
+    };
+    this._log.log(
+      'tts',
+      `Captured resume snapshot: id=${this._resumeSnapshot.id} pos=${position.toFixed(1)}s`,
+    );
+  }
+
+  /**
+   * Schedule a deferred restore. Cancels any prior timer first so the
+   * most recent remote activity defines when restore actually fires.
+   * @param {number} afterSeconds - seconds from now to fire restore
+   */
+  _scheduleRestore(afterSeconds) {
+    this._cancelRestore();
+    const delayMs = Math.max(0, afterSeconds + 0.5) * 1000;
+    this._restoreTimer = setTimeout(() => {
+      this._restoreTimer = null;
+      if (!this._resumeSnapshot || !this._card.ttsTarget) return;
+      const snap = this._resumeSnapshot;
+      this._resumeSnapshot = null;
+      const atEnd = snap.duration && snap.position + 2 >= snap.duration;
+      if (atEnd) {
+        this._log.log('tts', `Skipping restore - at/near end (pos=${snap.position.toFixed(1)}s dur=${snap.duration}s)`);
+        return;
+      }
+      restoreRemote(this._card, snap);
+    }, delayMs);
+  }
+
+  _cancelRestore() {
+    if (this._restoreTimer) {
+      clearTimeout(this._restoreTimer);
+      this._restoreTimer = null;
+    }
   }
 
   /**
@@ -448,6 +605,21 @@ export class TtsManager {
     this._card.wakeWord?.resumeFromPlayback();
     this._card.analyser.detachAudio();
     this._releaseAudio();
+
+    // Schedule a deferred restore for the captured snapshot. A done chime
+    // typically fires within a few ms of _onComplete via onTTSComplete,
+    // and that chime call will cancel + reschedule for after itself, so
+    // restore lands cleanly at the very end of the interaction. The 1s
+    // delay here is a safety floor for the rare case no chime follows.
+    // Skipped on playback failure (the user didn't actually hear TTS, no
+    // point displacing whatever's currently playing on the remote).
+    if (!playbackFailed && this._resumeSnapshot && this._remoteTarget) {
+      this._scheduleRestore(1);
+    } else if (playbackFailed) {
+      this._cancelRestore();
+      this._resumeSnapshot = null;
+    }
+
     this._playing = false;
     this._remoteTarget = null;
     this._remoteSawPlaying = false;

@@ -62,11 +62,13 @@ async def async_setup_entry(
     wake_word_2_select = VoiceSatelliteWakeWordModel2Select(
         hass, entry, mww_models, oww_models, vww_models, detection_select,
     )
+    tts_output_select = VoiceSatelliteTTSOutputSelect(hass, entry)
     entities = [
         VoiceSatellitePipelineSelect(hass, entry),
         VoiceSatellitePipeline2Select(hass, entry, wake_word_2_select),
         VoiceSatelliteVadSensitivitySelect(hass, entry),
-        VoiceSatelliteTTSOutputSelect(hass, entry),
+        tts_output_select,
+        VoiceSatelliteTTSOutputModeSelect(hass, entry, tts_output_select),
         VoiceSatelliteSessionDurationSelect(hass, entry),
         detection_select,
         VoiceSatelliteWakeWordModelSelect(hass, entry, mww_models, oww_models, vww_models, detection_select),
@@ -142,6 +144,11 @@ class VoiceSatelliteTTSOutputSelect(SelectEntity, RestoreEntity):
         self._selected_entity_id: str | None = None
         self._mapping_cache: tuple[dict[str, str], dict[str, str]] | None = None
         self._cache_time: float = 0
+        self._dependents: list[SelectEntity] = []
+
+    def register_dependent(self, entity: SelectEntity) -> None:
+        """Register an entity whose `available` depends on this selection."""
+        self._dependents.append(entity)
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -239,6 +246,93 @@ class VoiceSatelliteTTSOutputSelect(SelectEntity, RestoreEntity):
             _, name_to_eid = self._build_mapping()
             self._selected_entity_id = name_to_eid.get(option)
         self.async_write_ha_state()
+        for dep in self._dependents:
+            if dep.hass is not None:
+                dep.async_write_ha_state()
+
+
+TTS_OUTPUT_MODE_ANNOUNCEMENT = "announcement"
+TTS_OUTPUT_MODE_NORMAL_PLAYBACK = "normal_playback"
+TTS_OUTPUT_MODE_OPTIONS = [
+    TTS_OUTPUT_MODE_ANNOUNCEMENT,
+    TTS_OUTPUT_MODE_NORMAL_PLAYBACK,
+]
+
+
+class VoiceSatelliteTTSOutputModeSelect(SelectEntity, RestoreEntity):
+    """Select entity for remote TTS playback mode.
+
+    Controls how TTS audio is delivered to a remote media_player target.
+
+    'announcement' uses media_player.play_media with announce=true and
+    relies on the speaker's own announce-mode to duck/pause and restore
+    the user's prior media. This is the cleanest behavior on speakers
+    that implement the flag correctly (ESPHome, Sonos), but Google Cast
+    and most generic UPnP/DLNA players silently ignore the flag and the
+    user's music never resumes.
+
+    'normal_playback' issues plain play_media (no announce flag) and the
+    card explicitly captures + restores the prior media_content_id and
+    position after TTS completes. Useful when the speaker does not honor
+    announce. Restart-from-beginning fallback applies to sources that do
+    not accept media_seek (live streams, some queue-based integrations).
+
+    Unavailable when TTS Output is "Browser" since browser playback never
+    touches a remote player.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_has_entity_name = True
+    _attr_translation_key = "tts_output_mode_remote"
+    _attr_icon = "mdi:bullhorn-variant"
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        tts_output_select: VoiceSatelliteTTSOutputSelect,
+    ) -> None:
+        """Initialize the TTS output mode select entity."""
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_tts_output_mode_remote"
+        self._selected_option: str = TTS_OUTPUT_MODE_ANNOUNCEMENT
+        self._tts_output_select = tts_output_select
+        tts_output_select.register_dependent(self)
+
+    @property
+    def available(self) -> bool:
+        """Only available when TTS Output is a remote media_player."""
+        return self._tts_output_select.current_option != TTS_OUTPUT_BROWSER
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device info - same identifiers as the satellite entity."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
+    def options(self) -> list[str]:
+        """Return available options."""
+        return list(TTS_OUTPUT_MODE_OPTIONS)
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the currently selected option."""
+        return self._selected_option
+
+    async def async_added_to_hass(self) -> None:
+        """Restore previous selection on startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state in TTS_OUTPUT_MODE_OPTIONS:
+            self._selected_option = last_state.state
+
+    async def async_select_option(self, option: str) -> None:
+        """Handle option selection."""
+        if option in TTS_OUTPUT_MODE_OPTIONS:
+            self._selected_option = option
+            self.async_write_ha_state()
 
 
 SESSION_DURATION_DEFAULT = "persistent"
