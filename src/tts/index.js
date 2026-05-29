@@ -362,6 +362,35 @@ export class TtsManager {
     }
   }
 
+  /**
+   * Capture a snapshot of the remote target's currently-playing media so
+   * the deferred restore can put it back when the satellite is done.
+   * Idempotent within an interaction - re-calls while a snapshot already
+   * exists are no-ops. Used by both TTS playback and the notification path
+   * (announce, ask_question, start_conversation) so any first remote write
+   * in normal_playback mode captures before clobbering the speaker's state.
+   */
+  ensureRemoteSnapshot() {
+    if (this._resumeSnapshot) return;
+    if (!this._card.ttsTarget) return;
+    if (!this._isNormalPlaybackMode()) return;
+    this._captureRemoteSnapshot();
+  }
+
+  /**
+   * Schedule the deferred restore if there's a captured snapshot waiting.
+   * Used by notification managers (announce) to close the loop when no
+   * done chime will fire (wake_sound switch off). A subsequent chime/TTS
+   * will cancel and reschedule; the safety timer here just guarantees the
+   * music doesn't stay dead when no other trigger lands.
+   * @param {number} seconds - delay before restore fires
+   */
+  scheduleRemoteRestoreIfNeeded(seconds) {
+    if (!this._resumeSnapshot) return;
+    if (!this._card.ttsTarget) return;
+    this._scheduleRestore(seconds);
+  }
+
   /** True if remote TTS output mode is 'normal_playback'. */
   _isNormalPlaybackMode() {
     const mode = getSelectState(

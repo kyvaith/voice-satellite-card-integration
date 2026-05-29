@@ -3,6 +3,7 @@
 import { CHIME_ANNOUNCE_URL } from '../audio/chime.js';
 import { buildMediaUrl, playMediaUrl } from '../audio/media-playback.js';
 import { playRemote } from '../tts/comms.js';
+import { getSelectState } from './satellite-state.js';
 import { BlurReason, Timing } from '../constants.js';
 
 /** Safety timeout for remote notification playback (matches TTS manager) */
@@ -274,6 +275,12 @@ export function clearNotificationUI(mgr) {
     mgr.clearTimeoutId = null;
   }
 
+  // Cancellation paths (double-tap, stop word) reach this without going
+  // through the normal onDone, so the remote safety/duration timer can
+  // still be live. Clearing it here keeps it from firing an orphaned
+  // onComplete 30s later (second done chime, second sendAck, etc.).
+  _clearRemotePlayback(mgr);
+
   _disableStopWord(mgr);
 
   mgr.card.ui.setAnnouncementMode(false);
@@ -336,7 +343,21 @@ export function playMediaFor(mgr, urlPath, logPrefix, onDone) {
 
 function _playMediaForRemote(mgr, urlPath, ttsTarget, logPrefix, onDone) {
   const remoteUrl = urlPath.startsWith('media-source://') ? urlPath : buildMediaUrl(urlPath);
-  mgr.log.log(logPrefix, `Playing on remote: ${ttsTarget} media: ${remoteUrl}`);
+
+  // In 'normal_playback' mode, snapshot the remote's current media via
+  // TtsManager before this play_media clobbers it. The eventual done chime
+  // (every notification flow ends with one via TtsManager.playChime) picks
+  // up the snapshot and schedules the restore.
+  mgr.card.tts?.ensureRemoteSnapshot();
+  const mode = getSelectState(
+    mgr.card.hass,
+    mgr.card.config?.satellite_entity,
+    'tts_output_mode_remote',
+    'announcement',
+  );
+  const announce = mode !== 'normal_playback';
+
+  mgr.log.log(logPrefix, `Playing on remote: ${ttsTarget} media: ${remoteUrl} announce=${announce}`);
   mgr.card.mediaPlayer.notifyAudioStart('notification');
 
   const entity = mgr.card.hass?.states?.[ttsTarget];
@@ -353,7 +374,7 @@ function _playMediaForRemote(mgr, urlPath, ttsTarget, logPrefix, onDone) {
     logPrefix,
   };
 
-  playRemote(mgr.card, remoteUrl).catch(() => {
+  playRemote(mgr.card, remoteUrl, { announce }).catch(() => {
     mgr.log.log(logPrefix, 'Remote play service call failed - forcing completion');
     mgr._remotePlayback?.onDone();
   });

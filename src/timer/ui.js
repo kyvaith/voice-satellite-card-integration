@@ -3,6 +3,7 @@
 import { playChime, CHIME_ALERT, getChimeDuration } from '../audio/chime.js';
 import { buildMediaUrl, playMediaUrl } from '../audio/media-playback.js';
 import { playRemote, stopRemote } from '../tts/comms.js';
+import { getSelectState } from '../shared/satellite-state.js';
 import { BlurReason, DEFAULT_CONFIG, Timing } from '../constants.js';
 
 let _alertLoopTimer = null;
@@ -129,11 +130,20 @@ export function clearAlert(mgr) {
     removeContainer(mgr);
   }
 
+  // Restore the user's pre-alert remote media in normal_playback mode.
+  // No-op when no snapshot was captured (announcement mode, browser TTS,
+  // or speaker was idle when the alert fired).
+  mgr.card.tts?.scheduleRemoteRestoreIfNeeded(1);
+
   mgr.log.log('timer', 'Alert dismissed');
 }
 
 /** @param {import('./index.js').TimerManager} mgr */
 function playAlertChime(mgr) {
+  // In normal_playback mode, snapshot the remote before the chime fires
+  // (chime.js writes to the remote via play_media with announce=false,
+  // wiping any user music). Idempotent across loop iterations.
+  mgr.card.tts?.ensureRemoteSnapshot();
   playChime(mgr.card, CHIME_ALERT, mgr.log);
   mgr.log.log('timer', 'Alert chime played');
 }
@@ -309,7 +319,17 @@ async function playTimerTtsMedia(mgr, token, media) {
   try {
     if (card.ttsTarget) {
       const durationMs = await getAudioDurationMs(url);
-      await playRemote(card, media.mediaId || url).catch((e) => {
+      // Match the chime path's mode-aware announce flag, and ensure the
+      // pre-alert snapshot exists so clearAlert can restore the music.
+      card.tts?.ensureRemoteSnapshot();
+      const mode = getSelectState(
+        card.hass,
+        card.config?.satellite_entity,
+        'tts_output_mode_remote',
+        'announcement',
+      );
+      const announce = mode !== 'normal_playback';
+      await playRemote(card, media.mediaId || url, { announce }).catch((e) => {
         mgr.log.error('timer', `Timer TTS remote playback failed: ${e?.message || e}`);
       });
       _timerTtsRemoteActive = true;

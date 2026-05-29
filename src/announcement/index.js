@@ -67,6 +67,12 @@ export class AnnouncementManager {
 
       if (getSwitchState(this._card.hass, this._card.config.satellite_entity, 'wake_sound') !== false) {
         this._card.tts.playChime('done');
+      } else {
+        // No done chime to drive the remote restore in 'normal_playback'
+        // mode - schedule it directly so the user's prior music resumes.
+        // No-op when no snapshot was captured (e.g. announcement mode or
+        // browser TTS output).
+        this._card.tts.scheduleRemoteRestoreIfNeeded(1);
       }
 
       // Re-sync bar state — updateForState calls during the linger were
