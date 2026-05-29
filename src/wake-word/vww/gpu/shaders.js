@@ -23,6 +23,9 @@ const ELEMENTWISE_WORKGROUP = 32;
 const CONV_WG_W = 4;
 const CONV_WG_H = 4;
 const CONV_WG_C = 1;
+const COMPAT_CONV_WG_W = 1;
+const COMPAT_CONV_WG_H = 1;
+const COMPAT_CONV_WG_C = 1;
 const MATMUL_WG_W = 4;
 const MATMUL_WG_H = 4;
 
@@ -222,7 +225,164 @@ export function conv2dNchwShader(cfg) {
 /** Workgroup sizes for CONV_2D dispatch - main thread uses these to
  *  compute the workgroup count from output dims. */
 export const CONV_DISPATCH_WORKGROUP = [CONV_WG_W, CONV_WG_H, CONV_WG_C];
+export const COMPAT_CONV_DISPATCH_WORKGROUP = [COMPAT_CONV_WG_W, COMPAT_CONV_WG_H, COMPAT_CONV_WG_C];
 export const MATMUL_DISPATCH_WORKGROUP = [MATMUL_WG_W, MATMUL_WG_H, 1];
+
+/**
+ * Compatibility Conv shader for fragile Android/WebView WebGPU drivers.
+ *
+ * Unlike the fast Conv shaders above, this keeps shape/stride/padding
+ * values in a uniform buffer and uses a 1x1x1 workgroup. That gives the
+ * compiler less opportunity to specialize or unroll each layer at pipeline
+ * creation time, at the cost of slower inference. Intended for tester-only
+ * device triage, not the high-performance live path.
+ */
+export function compatConv2dNhwcShader() {
+  return /* wgsl */`
+    struct ConvCompatParams {
+      dims0: vec4<i32>,  // inH, inW, inC, outH
+      dims1: vec4<i32>,  // outW, outC, kH, kW
+      steps0: vec4<i32>, // strideH, strideW, dilationH, dilationW
+      pad0: vec4<i32>,   // padTop, padLeft, activationKind, unused
+      act0: vec4<f32>,   // alpha, maxScalar, unused, unused
+    };
+
+    @group(0) @binding(0) var<storage, read> inputBuf: array<f32>;
+    @group(0) @binding(1) var<storage, read> weightsBuf: array<f32>;
+    @group(0) @binding(2) var<storage, read> biasBuf: array<f32>;
+    @group(0) @binding(3) var<storage, read_write> outputBuf: array<f32>;
+    @group(0) @binding(4) var<uniform> p: ConvCompatParams;
+
+    @compute @workgroup_size(${COMPAT_CONV_WG_W}, ${COMPAT_CONV_WG_H}, ${COMPAT_CONV_WG_C})
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let ow: u32 = gid.x;
+      let oh: u32 = gid.y;
+      let oc: u32 = gid.z;
+      let outW: u32 = u32(p.dims1.x);
+      let outH: u32 = u32(p.dims0.w);
+      let outC: u32 = u32(p.dims1.y);
+      if (ow >= outW || oh >= outH || oc >= outC) {
+        return;
+      }
+
+      let inH: i32 = p.dims0.x;
+      let inW: i32 = p.dims0.y;
+      let inC: u32 = u32(p.dims0.z);
+      let kH: u32 = u32(p.dims1.z);
+      let kW: u32 = u32(p.dims1.w);
+      var acc: f32 = biasBuf[oc];
+
+      for (var kh: u32 = 0u; kh < kH; kh = kh + 1u) {
+        let inY: i32 = i32(oh) * p.steps0.x + i32(kh) * p.steps0.z - p.pad0.x;
+        if (inY < 0 || inY >= inH) { continue; }
+        for (var kw: u32 = 0u; kw < kW; kw = kw + 1u) {
+          let inX: i32 = i32(ow) * p.steps0.y + i32(kw) * p.steps0.w - p.pad0.y;
+          if (inX < 0 || inX >= inW) { continue; }
+          let inPixBase: u32 = (u32(inY) * u32(inW) + u32(inX)) * inC;
+          let wKwBase: u32 = ((oc * kH + kh) * kW + kw) * inC;
+          for (var ic: u32 = 0u; ic < inC; ic = ic + 1u) {
+            acc = acc + inputBuf[inPixBase + ic] * weightsBuf[wKwBase + ic];
+          }
+        }
+      }
+
+      if (p.pad0.z == 1) {
+        acc = max(select(acc * p.act0.x, acc, acc >= 0.0), p.act0.y);
+      }
+      outputBuf[(oh * outW + ow) * outC + oc] = acc;
+    }
+  `;
+}
+
+export function compatConv1dNcwShader() {
+  return /* wgsl */`
+    struct ConvCompatParams {
+      dims0: vec4<i32>,  // inC, inW, outC, outW
+      dims1: vec4<i32>,  // kW, unused, unused, unused
+      steps0: vec4<i32>, // strideW, dilationW, unused, unused
+      pad0: vec4<i32>,   // padLeft, unused, unused, unused
+      act0: vec4<f32>,
+    };
+
+    @group(0) @binding(0) var<storage, read> inputBuf: array<f32>;
+    @group(0) @binding(1) var<storage, read> weightsBuf: array<f32>;
+    @group(0) @binding(2) var<storage, read> biasBuf: array<f32>;
+    @group(0) @binding(3) var<storage, read_write> outputBuf: array<f32>;
+    @group(0) @binding(4) var<uniform> p: ConvCompatParams;
+
+    @compute @workgroup_size(${COMPAT_CONV_WG_W}, ${COMPAT_CONV_WG_H}, 1)
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let ow: u32 = gid.x;
+      let oc: u32 = gid.y;
+      let inC: u32 = u32(p.dims0.x);
+      let inW: i32 = p.dims0.y;
+      let outC: u32 = u32(p.dims0.z);
+      let outW: u32 = u32(p.dims0.w);
+      let kW: u32 = u32(p.dims1.x);
+      if (ow >= outW || oc >= outC) { return; }
+
+      var acc: f32 = biasBuf[oc];
+      for (var ic: u32 = 0u; ic < inC; ic = ic + 1u) {
+        for (var kw: u32 = 0u; kw < kW; kw = kw + 1u) {
+          let iw: i32 = i32(ow) * p.steps0.x + i32(kw) * p.steps0.y - p.pad0.x;
+          if (iw < 0 || iw >= inW) { continue; }
+          acc = acc + inputBuf[ic * u32(inW) + u32(iw)] * weightsBuf[(oc * inC + ic) * kW + kw];
+        }
+      }
+      outputBuf[oc * outW + ow] = acc;
+    }
+  `;
+}
+
+export function compatConv2dNchwShader() {
+  return /* wgsl */`
+    struct ConvCompatParams {
+      dims0: vec4<i32>,  // inC, inH, inW, outC
+      dims1: vec4<i32>,  // outH, outW, kH, kW
+      steps0: vec4<i32>, // strideH, strideW, dilationH, dilationW
+      pad0: vec4<i32>,   // padTop, padLeft, unused, unused
+      act0: vec4<f32>,
+    };
+
+    @group(0) @binding(0) var<storage, read> inputBuf: array<f32>;
+    @group(0) @binding(1) var<storage, read> weightsBuf: array<f32>;
+    @group(0) @binding(2) var<storage, read> biasBuf: array<f32>;
+    @group(0) @binding(3) var<storage, read_write> outputBuf: array<f32>;
+    @group(0) @binding(4) var<uniform> p: ConvCompatParams;
+
+    @compute @workgroup_size(${COMPAT_CONV_WG_W}, ${COMPAT_CONV_WG_H}, ${COMPAT_CONV_WG_C})
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let ow: u32 = gid.x;
+      let oh: u32 = gid.y;
+      let oc: u32 = gid.z;
+      let inC: u32 = u32(p.dims0.x);
+      let inH: i32 = p.dims0.y;
+      let inW: i32 = p.dims0.z;
+      let outC: u32 = u32(p.dims0.w);
+      let outH: u32 = u32(p.dims1.x);
+      let outW: u32 = u32(p.dims1.y);
+      let kH: u32 = u32(p.dims1.z);
+      let kW: u32 = u32(p.dims1.w);
+      if (ow >= outW || oh >= outH || oc >= outC) { return; }
+
+      var acc: f32 = biasBuf[oc];
+      for (var ic: u32 = 0u; ic < inC; ic = ic + 1u) {
+        for (var kh: u32 = 0u; kh < kH; kh = kh + 1u) {
+          let ih: i32 = i32(oh) * p.steps0.x + i32(kh) * p.steps0.z - p.pad0.x;
+          if (ih < 0 || ih >= inH) { continue; }
+          for (var kw: u32 = 0u; kw < kW; kw = kw + 1u) {
+            let iw: i32 = i32(ow) * p.steps0.y + i32(kw) * p.steps0.w - p.pad0.y;
+            if (iw < 0 || iw >= inW) { continue; }
+            let inIdx: u32 = (ic * u32(inH) + u32(ih)) * u32(inW) + u32(iw);
+            let wIdx: u32 = ((oc * inC + ic) * kH + kh) * kW + kw;
+            acc = acc + inputBuf[inIdx] * weightsBuf[wIdx];
+          }
+        }
+      }
+      outputBuf[(oc * outH + oh) * outW + ow] = acc;
+    }
+  `;
+}
 
 /**
  * LEAKY_RELU element-wise:  out[i] = max(x, alpha * x)  - equivalent

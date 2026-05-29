@@ -51,8 +51,11 @@ export class VwwInference {
    * @param {GPUDevice} device
    * @param {object} [featureConfig]  resolved JSON manifest feature_config
    */
-  constructor(device, featureConfig = null) {
+  constructor(device, featureConfig = null, options = {}) {
     this._device = device;
+    this._gpuCompatibilityMode = options.gpuCompatibilityMode === true;
+    this._log = options.log || null;
+    this._pipelineLog = options.pipelineLog === true;
     this._featureConfig = { ...DEFAULT_FEATURE_CONFIG, ...(featureConfig || {}) };
     const cfg = this._featureConfig;
     this._windowSamples = Math.round(cfg.sample_rate * cfg.window_ms / 1000);
@@ -97,7 +100,11 @@ export class VwwInference {
    */
   async addKeyword(name, compiled, ctcConfig = null) {
     if (this._keywords.has(name)) return;
-    const runner = await GpuModelRunner.create(this._device, compiled);
+    const runner = await GpuModelRunner.create(this._device, compiled, {
+      gpuCompatibilityMode: this._gpuCompatibilityMode,
+      log: this._log,
+      pipelineLog: this._pipelineLog,
+    });
     const keyword = { name, compiled, runner, ctcDecoder: null };
     if (ctcConfig) {
       // Output shape is (1, T_out, V).  compiled.outputs[0].dims has

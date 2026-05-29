@@ -110,6 +110,7 @@ async function init({
   energyGateEnabled,
   sensitivityLabel,
   enableTimings,
+  vwwGpuCompatibilityMode,
 }) {
   if (backend) {
     try { backend.destroy(); } catch (_) { /* ignore */ }
@@ -147,6 +148,10 @@ async function init({
       energyGateEnabled,
       sensitivityLabel,
       enableTimings === true,
+      {
+        gpuCompatibilityMode: vwwGpuCompatibilityMode === true,
+        pipelineLog: vwwGpuCompatibilityMode === true,
+      },
     );
     for (const name of models) {
       if (!active.has(name)) backend.removeKeyword(name);

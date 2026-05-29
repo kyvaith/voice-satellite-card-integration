@@ -185,6 +185,7 @@ export class WakeWordTestSession {
     // a faithful preview of what the user will experience at runtime.
     this._energyGateEnabled = opts.energyGateEnabled === true;
     this._sensitivityLabel = opts.sensitivityLabel || 'Moderately sensitive';
+    this._vwwGpuCompatibilityMode = this._engine === 'vww' && opts.vwwGpuCompatibilityMode === true;
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
@@ -422,6 +423,12 @@ export class WakeWordTestSession {
     }
     // For VWW with no explicit threshold, omit cutoffs so the worker
     // pulls each model's recommended_threshold from its JSON manifest.
+    if (this._engine === 'vww') {
+      this._emitLog(
+        'info',
+        `VWW GPU shader mode: ${this._vwwGpuCompatibilityMode ? 'compatibility Conv shaders' : 'standard high-performance shaders'}`,
+      );
+    }
     this._inference = await WorkerProxyBackend.create({
       engine: ['oww', 'vww', 'mww'].includes(this._engine) ? this._engine : 'mww',
       models: [this._modelName],
@@ -429,6 +436,7 @@ export class WakeWordTestSession {
       energyGateEnabled: this._energyGateEnabled,
       sensitivityLabel: this._sensitivityLabel,
       enableTimings: true,
+      vwwGpuCompatibilityMode: this._vwwGpuCompatibilityMode,
       log: this._instanceLog,
     });
   }

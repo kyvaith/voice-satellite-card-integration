@@ -160,12 +160,13 @@ export class VwwBackend {
    * @param {string} sensitivityLabel
    * @param {boolean} enableTimings
    */
-  static async create(keywordConfigs, log, energyGateEnabled = true, sensitivityLabel = 'Moderately sensitive', enableTimings = false) {
+  static async create(keywordConfigs, log, energyGateEnabled = true, sensitivityLabel = 'Moderately sensitive', enableTimings = false, options = {}) {
     if (!keywordConfigs?.length) {
       throw new Error('VwwBackend.create needs at least one keyword');
     }
     await checkpointVwwStartup('backend:create', {
       models: keywordConfigs.map((cfg) => cfg.name),
+      compat: options.gpuCompatibilityMode === true,
     });
     // WebGPU is mandatory for vsWakeWord too (matches OWW). Devices
     // without WebGPU surface the same toast suggesting microWakeWord.
@@ -198,6 +199,9 @@ export class VwwBackend {
         device,
         sharedMelspec: firstEntry.sharedMelspec,
         sharedEmbedding: firstEntry.sharedEmbedding,
+        gpuCompatibilityMode: options.gpuCompatibilityMode === true,
+        log,
+        pipelineLog: options.pipelineLog === true,
       });
       await inference.ready;
     } else {
@@ -206,7 +210,11 @@ export class VwwBackend {
       // which is handled per-keyword by VwwInference.addKeyword().
       const firstEntry = entries[keywordConfigs[0].name];
       const featureCfg = firstEntry.manifest?.feature_config || null;
-      inference = new VwwInference(device, featureCfg);
+      inference = new VwwInference(device, featureCfg, {
+        gpuCompatibilityMode: options.gpuCompatibilityMode === true,
+        log,
+        pipelineLog: options.pipelineLog === true,
+      });
     }
 
     const cutoffs = {};
@@ -258,7 +266,8 @@ export class VwwBackend {
       'wake-word',
       `VWW backend ready: ${modesDesc} `
       + `(energy gate ${energyGateEnabled ? 'on' : 'off'}, `
-      + `sensitivity=${sensitivityLabel}, sleep=${energy.sleep} wake=${energy.wake})`,
+      + `sensitivity=${sensitivityLabel}, sleep=${energy.sleep} wake=${energy.wake}`
+      + `${options.gpuCompatibilityMode === true ? ', gpu_compat=true' : ''})`,
     );
     clearVwwStartupBreadcrumb({
       models: keywordConfigs.map((cfg) => cfg.name),

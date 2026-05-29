@@ -67,6 +67,8 @@ export class WorkerProxyBackend {
    * @param {boolean} [options.energyGateEnabled=true]
    * @param {string} [options.sensitivityLabel='Moderately sensitive']
    * @param {boolean} [options.enableTimings=false] - tester-only diagnostics
+   * @param {boolean} [options.vwwGpuCompatibilityMode=false] - tester-only
+   *   safe Conv shader path for fragile WebGPU drivers.
    * @param {object} [options.log] - logger (forwarded for unsolicited worker logs)
    * @returns {Promise<WorkerProxyBackend>}
    */
@@ -98,6 +100,7 @@ export class WorkerProxyBackend {
       energyGateEnabled: options.energyGateEnabled !== false,
       sensitivityLabel: options.sensitivityLabel || 'Moderately sensitive',
       enableTimings: options.enableTimings === true,
+      vwwGpuCompatibilityMode: options.vwwGpuCompatibilityMode === true,
     }, INIT_TIMEOUT_MS);
     if (initResult?.cutoffs) {
       for (const [name, cutoff] of Object.entries(initResult.cutoffs)) {

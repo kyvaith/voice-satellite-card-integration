@@ -53,10 +53,13 @@ export class VwwEmbeddingInference {
    * @param {object} opts.sharedMelspec     - compiled OWW melspec ONNX
    * @param {object} opts.sharedEmbedding   - compiled OWW embedding ONNX
    */
-  constructor({ device, sharedMelspec, sharedEmbedding }) {
+  constructor({ device, sharedMelspec, sharedEmbedding, gpuCompatibilityMode = false, log = null, pipelineLog = false }) {
     this._device = device;
     this._sharedMelspec = sharedMelspec;
     this._sharedEmbedding = sharedEmbedding;
+    this._gpuCompatibilityMode = gpuCompatibilityMode === true;
+    this._log = log;
+    this._pipelineLog = pipelineLog === true;
     this._melGpuRunner = null;
     this._embeddingGpuRunner = null;
 
@@ -83,8 +86,13 @@ export class VwwEmbeddingInference {
   }
 
   async _init() {
-    this._melGpuRunner = await GpuModelRunner.create(this._device, this._sharedMelspec);
-    this._embeddingGpuRunner = await GpuModelRunner.create(this._device, this._sharedEmbedding);
+    const runnerOptions = {
+      gpuCompatibilityMode: this._gpuCompatibilityMode,
+      log: this._log,
+      pipelineLog: this._pipelineLog,
+    };
+    this._melGpuRunner = await GpuModelRunner.create(this._device, this._sharedMelspec, runnerOptions);
+    this._embeddingGpuRunner = await GpuModelRunner.create(this._device, this._sharedEmbedding, runnerOptions);
     // Defer per-keyword warmup until addKeyword() so each new keyword's
     // window is filled with its own embedding history.
   }
@@ -101,7 +109,11 @@ export class VwwEmbeddingInference {
    */
   async addKeyword(name, classifierCompiled, embeddingWindow = DEFAULT_EMBEDDING_WINDOW) {
     if (this._keywords.has(name)) return;
-    const classifierRunner = await GpuModelRunner.create(this._device, classifierCompiled);
+    const classifierRunner = await GpuModelRunner.create(this._device, classifierCompiled, {
+      gpuCompatibilityMode: this._gpuCompatibilityMode,
+      log: this._log,
+      pipelineLog: this._pipelineLog,
+    });
     const kw = {
       classifierRunner,
       embeddingWindow,
