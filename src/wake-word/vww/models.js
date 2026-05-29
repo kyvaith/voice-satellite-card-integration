@@ -22,6 +22,7 @@
  */
 
 import { compileOwwOnnxModel } from './onnx-runner.js';
+import { checkpointVwwStartup } from './startup-breadcrumb.js';
 
 function getModelsBase() {
   return globalThis.__VS_VWW_MODELS_BASE || '/voice_satellite/models/vswakeword';
@@ -37,6 +38,7 @@ let _sharedEmbeddingInflight = null;
 
 async function _fetchManifest(name) {
   const url = `${getModelsBase()}/${name}.json`;
+  await checkpointVwwStartup('model:fetch-manifest', { model: name, url });
   // `cache: 'no-store'` so manifest edits take effect on plain reload.
   const resp = await fetch(url, { cache: 'no-store' });
   if (!resp.ok) return null;
@@ -49,6 +51,7 @@ async function _fetchAndCompile(urlOrName, manifestForShape) {
   const url = urlOrName.startsWith('/') || urlOrName.includes('://')
     ? urlOrName
     : `${getModelsBase()}/${urlOrName}.onnx`;
+  await checkpointVwwStartup('model:fetch-onnx', { model: urlOrName, url });
   const resp = await fetch(url, { cache: 'no-cache' });
   if (!resp.ok) {
     throw new Error(`VWW ONNX fetch failed: ${url} (HTTP ${resp.status})`);
@@ -62,6 +65,11 @@ async function _fetchAndCompile(urlOrName, manifestForShape) {
   const inputShape = manifestForShape?.input?.shape
     || manifestForShape?.input_shape
     || null;
+  await checkpointVwwStartup('model:compile-onnx', {
+    model: urlOrName,
+    inputShape,
+    bytes: buffer.byteLength,
+  });
   const compiled = compileOwwOnnxModel(buffer, inputShape ? { inputShape } : undefined);
   compiled.format = 'onnx';
   return compiled;

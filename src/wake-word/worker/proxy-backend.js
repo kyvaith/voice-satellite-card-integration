@@ -126,6 +126,10 @@ export class WorkerProxyBackend {
   _onMessage(event) {
     const data = event.data;
     if (!data) return;
+    if (data.type === 'vww-startup-breadcrumb') {
+      this._persistVwwStartupBreadcrumb(data.payload);
+      return;
+    }
     if (data.type === 'log') {
       // Forward worker-side logs through the main-thread logger so the
       // existing UI log surfaces continue to work identically.
@@ -167,6 +171,18 @@ export class WorkerProxyBackend {
       entry.reject(new Error(`Worker error: ${message}`));
     }
     this._pending.clear();
+  }
+
+  _persistVwwStartupBreadcrumb(payload) {
+    if (!payload) return;
+    try {
+      if (payload.clear === true) {
+        localStorage.removeItem('__vs_vww_startup_breadcrumb__');
+        localStorage.setItem('__vs_vww_startup_last_success__', JSON.stringify(payload));
+      } else {
+        localStorage.setItem('__vs_vww_startup_breadcrumb__', JSON.stringify(payload));
+      }
+    } catch (_) { /* diagnostics only */ }
   }
 
   // ─── Mirror the inference-backend interface ──────────────────────────

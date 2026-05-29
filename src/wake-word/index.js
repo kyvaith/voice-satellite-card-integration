@@ -557,18 +557,14 @@ export class WakeWordManager {
           );
         } else if (engine === 'vww') {
           // vsWakeWord path: one self-contained ONNX per wake word.
-          // When stop-word is enabled we ALSO load the VWW stop
-          // classifier (ok_stop.onnx) alongside, marked INACTIVE.
-          // enableStopModel() / disableStopModel() flip its active flag
-          // during interruptible states (TTS playback, timers, etc.) -
-          // same lifecycle as OWW's stop classifier.  Pre-warm the
-          // main-thread manifest cache so threshold / sensitivity math
-          // uses each model's real recommended cutoff.
+          // Keep startup focused on the primary wake model(s).  The VWW
+          // stop classifier (ok_stop.onnx) can be lazily loaded by
+          // enableStopModel() when an interruptible state actually begins;
+          // staging it this way avoids compiling an optional WebGPU graph
+          // during initial page load.
           const stopEnabled = this.isStopWordEnabled();
           const vwwStopName = VWW_STOP_NAME;
-          const allClassifiers = stopEnabled
-            ? [...wakeModels, vwwStopName]
-            : wakeModels;
+          const allClassifiers = wakeModels;
           await Promise.all(allClassifiers.map((name) => loadVwwModelParams(name).catch(() => null)));
           const cutoffs = {};
           for (const name of allClassifiers) cutoffs[name] = this.getThresholdForModel(name);
@@ -583,16 +579,11 @@ export class WakeWordManager {
             sensitivityLabel: this._getSensitivityLabel(),
             log: this._log,
           });
-          if (stopEnabled) {
-            this._stopMicroConfig = {
-              name: vwwStopName,
-              cutoff: this.getThresholdForModel(vwwStopName),
-            };
-          }
+          if (stopEnabled) this._stopMicroConfig = null;
           this._loadedModelsKey = modelsKey;
           this._log.log(
             'wake-word',
-            `VWW worker ready - active: ${wakeModels.join(', ')}${stopEnabled ? ` (${vwwStopName} loaded, inactive)` : ''}`,
+            `VWW worker ready - active: ${wakeModels.join(', ')}${stopEnabled ? ` (${vwwStopName} deferred)` : ''}`,
           );
         } else {
           // microWakeWord path (also covers stop-word-only standby).

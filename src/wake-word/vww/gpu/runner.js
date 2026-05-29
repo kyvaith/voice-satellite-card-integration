@@ -53,6 +53,7 @@ import {
   sliceShader,
   concatInputShader,
 } from './shaders.js';
+import { clearVwwStartupBreadcrumb, checkpointVwwStartup, yieldToBrowser } from '../startup-breadcrumb.js';
 
 const TT_FLOAT32 = 0;
 
@@ -90,6 +91,7 @@ export class GpuModelRunner {
     this._outputSize = 0;
     // Float32Array view into the output (filled by invoke()).
     this._outputView = null;
+    this._invokeCount = 0;
   }
 
   async _build() {
@@ -117,7 +119,9 @@ export class GpuModelRunner {
     // Walk ops in declared order; build a pipeline + bind group per step.
     for (let i = 0; i < ops.length; i++) {
       const op = ops[i];
-      const fused = this._tryBuildFusedConvActivation(ops, i, tensors);
+      this._buildOpIndex = i;
+      this._buildOpName = op.opName;
+      const fused = await this._tryBuildFusedConvActivation(ops, i, tensors);
       if (fused) {
         this._steps.push(fused);
         i += 2;
@@ -147,6 +151,28 @@ export class GpuModelRunner {
     const inputId = sg.inputIds[0];
     this._inputId = inputId;
     this._inputSize = shapeSize(tensors[inputId].shape);
+    this._buildOpIndex = null;
+    this._buildOpName = null;
+  }
+
+  async _createComputePipeline(wgsl, label) {
+    await checkpointVwwStartup('pipeline:create', {
+      label,
+      opIndex: this._buildOpIndex,
+      opName: this._buildOpName,
+    });
+    const descriptor = {
+      layout: 'auto',
+      compute: {
+        module: this._device.createShaderModule({ code: wgsl }),
+        entryPoint: 'main',
+      },
+    };
+    const pipeline = typeof this._device.createComputePipelineAsync === 'function'
+      ? await this._device.createComputePipelineAsync(descriptor)
+      : this._device.createComputePipeline(descriptor);
+    await yieldToBrowser();
+    return pipeline;
   }
 
   _uploadConstant(t) {
@@ -302,7 +328,7 @@ export class GpuModelRunner {
     throw new Error(`GpuModelRunner: unsupported op ${op.opName}`);
   }
 
-  _tryBuildFusedConvActivation(ops, i, tensors) {
+  async _tryBuildFusedConvActivation(ops, i, tensors) {
     const conv = ops[i];
     const leaky = ops[i + 1];
     const maximum = ops[i + 2];
@@ -370,7 +396,7 @@ export class GpuModelRunner {
   //   4. Return a closure that records `pass.setPipeline`, `pass.setBindGroup`,
   //      and `pass.dispatchWorkgroups` for invoke()'s command pass.
 
-  _buildConv(op, tensors, fused = null) {
+  async _buildConv(op, tensors, fused = null) {
     // Conv options live in the model file.  CPU runner reads them via
     // its own helpers; here we read identically.  We do it eagerly at
     // build time because shape constants need to be baked into shader
@@ -399,10 +425,7 @@ export class GpuModelRunner {
       padLeft: pad.left,
       activation: fused?.activation,
     });
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'conv');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const weightsBuf = this._bufferFor(op.inputs[1]);
     const biasBuf = this._bufferFor(op.inputs[2]);
@@ -424,7 +447,7 @@ export class GpuModelRunner {
     return { kind: 'conv', pipeline, bindGroup, dispatchX, dispatchY, dispatchZ };
   }
 
-  _buildOnnxConv(op, tensors) {
+  async _buildOnnxConv(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const wMeta = tensors[op.inputs[1]];
     const outMeta = tensors[op.outputs[0]];
@@ -463,10 +486,7 @@ export class GpuModelRunner {
       dispatchY = Math.ceil(outMeta.shape[2] / CONV_DISPATCH_WORKGROUP[1]);
       dispatchZ = Math.ceil(outMeta.shape[1] / CONV_DISPATCH_WORKGROUP[2]);
     }
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'conv');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const weightsBuf = this._bufferFor(op.inputs[1]);
     const biasBuf = op.inputs[2] !== undefined
@@ -485,7 +505,7 @@ export class GpuModelRunner {
     return { kind: 'conv', pipeline, bindGroup, dispatchX, dispatchY, dispatchZ };
   }
 
-  _buildLeakyRelu(op, tensors) {
+  async _buildLeakyRelu(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const elementCount = shapeSize(inMeta.shape);
     const alpha = readLeakyReluAlpha(op);
@@ -493,13 +513,13 @@ export class GpuModelRunner {
     return this._build1InElementwiseStep(op, wgsl, elementCount);
   }
 
-  _buildUnary(op, tensors, fnExpr) {
+  async _buildUnary(op, tensors, fnExpr) {
     const elementCount = shapeSize(tensors[op.inputs[0]].shape);
     const wgsl = unaryShader(elementCount, fnExpr);
     return this._build1InElementwiseStep(op, wgsl, elementCount);
   }
 
-  _buildClip(op, tensors) {
+  async _buildClip(op, tensors) {
     const elementCount = shapeSize(tensors[op.inputs[0]].shape);
     const minMeta = tensors[op.inputs[1]];
     const maxMeta = tensors[op.inputs[2]];
@@ -518,10 +538,7 @@ export class GpuModelRunner {
           outputBuf[i] = min(max(inputBuf[i], minBuf[0]), MAX_V);
         }
       `;
-      const pipeline = this._device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-      });
+      const pipeline = await this._createComputePipeline(wgsl, 'clip');
       const bindGroup = this._device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [
@@ -561,7 +578,7 @@ export class GpuModelRunner {
    * If none of those match we throw - full N-D broadcasting isn't
    * needed by either OWW model.
    */
-  _buildBinaryWithBroadcast(op, tensors, kind) {
+  async _buildBinaryWithBroadcast(op, tensors, kind) {
     const aMeta = tensors[op.inputs[0]];
     const bMeta = tensors[op.inputs[1]];
     const outMeta = tensors[op.outputs[0]];
@@ -613,11 +630,8 @@ export class GpuModelRunner {
     return this._build2InElementwiseStep(op, wgsl, outSize, dataSideId, scalarSideId);
   }
 
-  _build1InElementwiseStep(op, wgsl, elementCount) {
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+  async _build1InElementwiseStep(op, wgsl, elementCount) {
+    const pipeline = await this._createComputePipeline(wgsl, 'elementwise-1in');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const outputBuf = this._bufferFor(op.outputs[0]);
     const bindGroup = this._device.createBindGroup({
@@ -631,11 +645,8 @@ export class GpuModelRunner {
     return { kind: 'ew', pipeline, bindGroup, dispatchX, dispatchY: 1, dispatchZ: 1 };
   }
 
-  _build2InElementwiseStep(op, wgsl, elementCount, aId, bId) {
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+  async _build2InElementwiseStep(op, wgsl, elementCount, aId, bId) {
+    const pipeline = await this._createComputePipeline(wgsl, 'elementwise-2in');
     const aBuf = this._bufferFor(aId);
     const bBuf = this._bufferFor(bId);
     const outputBuf = this._bufferFor(op.outputs[0]);
@@ -651,7 +662,7 @@ export class GpuModelRunner {
     return { kind: 'ew2', pipeline, bindGroup, dispatchX, dispatchY: 1, dispatchZ: 1 };
   }
 
-  _buildTranspose(op, tensors) {
+  async _buildTranspose(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const outMeta = tensors[op.outputs[0]];
     const permMeta = tensors[op.inputs[1]];
@@ -664,7 +675,7 @@ export class GpuModelRunner {
     return this._build1InElementwiseStep(op, wgsl, elementCount);
   }
 
-  _buildReduceMax(op, tensors) {
+  async _buildReduceMax(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const outMeta = tensors[op.outputs[0]];
     // Mel spec only uses REDUCE_MAX over all axes (output rank 0).
@@ -681,7 +692,7 @@ export class GpuModelRunner {
     return this._build1InElementwiseStep(op, wgsl, 1);
   }
 
-  _buildBatchMatmul(op, tensors) {
+  async _buildBatchMatmul(op, tensors) {
     const aMeta = tensors[op.inputs[0]];
     const bMeta = tensors[op.inputs[1]];
     const outMeta = tensors[op.outputs[0]];
@@ -699,10 +710,7 @@ export class GpuModelRunner {
     for (let i = 0; i < aMeta.shape.length - 2; i++) batchCount *= aMeta.shape[i];
 
     const wgsl = batchMatmulShader(M, Ka, N, batchCount);
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'matmul');
     const aBuf = this._bufferFor(op.inputs[0]);
     const bBuf = this._bufferFor(op.inputs[1]);
     const outputBuf = this._bufferFor(op.outputs[0]);
@@ -736,7 +744,7 @@ export class GpuModelRunner {
     };
   }
 
-  _buildMaxPool(op, tensors) {
+  async _buildMaxPool(op, tensors) {
     const { padding, strideH, strideW, filterH, filterW, fusedActivation } = readPool2dOptions(op);
     if (fusedActivation !== ACT_NONE) {
       throw new Error(`GpuModelRunner: MAX_POOL_2D fused activation ${fusedActivation} not supported`);
@@ -754,10 +762,7 @@ export class GpuModelRunner {
       padTop: pad.top,
       padLeft: pad.left,
     });
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'pool');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const outputBuf = this._bufferFor(op.outputs[0]);
     const bindGroup = this._device.createBindGroup({
@@ -780,7 +785,7 @@ export class GpuModelRunner {
    * 1-D bias C of length N.  We support that exact pattern (which is
    * what vsWakeWord's classifier head emits) and reject anything else.
    */
-  _buildGemm(op, tensors) {
+  async _buildGemm(op, tensors) {
     const alpha = onnxFloatAttr(op, 'alpha') ?? 1.0;
     const beta = onnxFloatAttr(op, 'beta') ?? 1.0;
     const transA = (onnxIntAttr(op, 'transA') ?? 0) !== 0;
@@ -805,10 +810,7 @@ export class GpuModelRunner {
     }
     const hasBias = !!cMeta && shapeSize(cMeta.shape) === N;
     const wgsl = gemmShader(M, Ka, N, hasBias, alpha, beta, transB);
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'gemm');
     const entries = [
       { binding: 0, resource: { buffer: this._bufferFor(op.inputs[0]) } },
       { binding: 1, resource: { buffer: this._bufferFor(op.inputs[1]) } },
@@ -838,7 +840,7 @@ export class GpuModelRunner {
    * output shape's declared rank differs.  Anything other than
    * contiguous trailing axes would need a different shader.
    */
-  _buildReduceMean(op, tensors) {
+  async _buildReduceMean(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const outMeta = tensors[op.outputs[0]];
     const inShape = inMeta.shape;
@@ -893,10 +895,7 @@ export class GpuModelRunner {
     let reduceCount = 1;
     for (let i = firstReduced; i < rank; i++) reduceCount *= inShape[i];
     const wgsl = reduceMeanTailShader(outerCount, reduceCount);
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'reduce-mean');
     const bindGroup = this._device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -916,7 +915,7 @@ export class GpuModelRunner {
    * dense output buffer.  starts/ends/axes/steps must be Constants
    * (folded at export time) - dynamic slice isn't supported.
    */
-  _buildSlice(op, tensors) {
+  async _buildSlice(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const outMeta = tensors[op.outputs[0]];
     const inShape = inMeta.shape;
@@ -958,10 +957,7 @@ export class GpuModelRunner {
       perAxisStep[a] = stp;
     }
     const wgsl = sliceShader(inShape, outShape, perAxisStart, perAxisStep);
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'slice');
     const bindGroup = this._device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -983,7 +979,7 @@ export class GpuModelRunner {
    * (a 12-input torch.cat would otherwise blow past the 8-buffer limit
    * common on tablets).
    */
-  _buildConcat(op, tensors) {
+  async _buildConcat(op, tensors) {
     const axisAttr = onnxIntAttr(op, 'axis') ?? 0;
     const outMeta = tensors[op.outputs[0]];
     const outShape = outMeta.shape;
@@ -999,10 +995,7 @@ export class GpuModelRunner {
       const inMeta = tensors[inputId];
       const axisSize = inMeta.shape[axis];
       const wgsl = concatInputShader(outerCount, axisSize, innerCount, outAxisSize, axisOffset);
-      const pipeline = this._device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-      });
+      const pipeline = await this._createComputePipeline(wgsl, 'concat');
       const bindGroup = this._device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [
@@ -1021,7 +1014,7 @@ export class GpuModelRunner {
     return { kind: 'concat', subSteps };
   }
 
-  _buildPad(op, tensors) {
+  async _buildPad(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const paddingsMeta = tensors[op.inputs[1]];
     const outMeta = tensors[op.outputs[0]];
@@ -1038,10 +1031,7 @@ export class GpuModelRunner {
       outShape: outMeta.shape,
       padTop, padLeft,
     });
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'pad');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const outputBuf = this._bufferFor(op.outputs[0]);
     const bindGroup = this._device.createBindGroup({
@@ -1058,7 +1048,7 @@ export class GpuModelRunner {
     return { kind: 'pad', pipeline, bindGroup, dispatchX, dispatchY, dispatchZ };
   }
 
-  _buildOnnxMaxPool(op, tensors) {
+  async _buildOnnxMaxPool(op, tensors) {
     const inMeta = tensors[op.inputs[0]];
     const outMeta = tensors[op.outputs[0]];
     const kernel = onnxIntsAttr(op, 'kernel_shape') || [1, 1];
@@ -1074,10 +1064,7 @@ export class GpuModelRunner {
       padTop: pads[0],
       padLeft: pads[1],
     });
-    const pipeline = this._device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: this._device.createShaderModule({ code: wgsl }), entryPoint: 'main' },
-    });
+    const pipeline = await this._createComputePipeline(wgsl, 'pool');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const outputBuf = this._bufferFor(op.outputs[0]);
     const bindGroup = this._device.createBindGroup({
@@ -1102,13 +1089,33 @@ export class GpuModelRunner {
    * @returns {Promise<Float32Array>}
    */
   async invoke(input) {
+    const firstInvoke = this._invokeCount === 0;
+    if (firstInvoke) {
+      await checkpointVwwStartup('invoke:first-submit', {
+        outputSize: this._outputSize,
+        inputLength: input.length,
+      });
+    }
     this.writeInput(input);
     const enc = this._device.createCommandEncoder();
     this.encode(enc);
     this.encodeOutputReadback(enc);
     this._device.queue.submit([enc.finish()]);
 
-    return this.readOutput();
+    if (firstInvoke && typeof this._device.queue.onSubmittedWorkDone === 'function') {
+      await checkpointVwwStartup('invoke:first-wait');
+      await this._device.queue.onSubmittedWorkDone();
+    }
+
+    if (firstInvoke) {
+      await checkpointVwwStartup('invoke:first-readback');
+    }
+    const out = await this.readOutput();
+    this._invokeCount++;
+    if (firstInvoke) {
+      clearVwwStartupBreadcrumb({ phase: 'invoke:first-complete' });
+    }
+    return out;
   }
 
   destroy() {

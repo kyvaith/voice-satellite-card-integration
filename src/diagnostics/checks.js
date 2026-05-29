@@ -395,6 +395,33 @@ export const CLIENT_CHECKS = [
 
   // ── Audio ──────────────────────────────────────────────────────────
   {
+    id: 'sat.vswakeword-last-startup',
+    category: CATEGORY.SATELLITE,
+    title: 'Previous vsWakeWord startup completed',
+    run: async () => {
+      let raw = null;
+      try { raw = localStorage.getItem('__vs_vww_startup_breadcrumb__'); } catch (_) {}
+      if (!raw) return { status: 'pass', detail: 'No incomplete vsWakeWord startup checkpoint is stored.' };
+      try {
+        const b = JSON.parse(raw);
+        const d = b?.detail || {};
+        const parts = [`phase=${b?.phase || 'unknown'}`];
+        if (d.model) parts.push(`model=${d.model}`);
+        if (d.opIndex !== undefined) parts.push(`op=${d.opIndex}:${d.opName || '?'}`);
+        if (d.label) parts.push(`label=${d.label}`);
+        return {
+          status: 'warn',
+          detail: `The previous vsWakeWord startup did not clear its checkpoint (${parts.join(' ')}). If Fully Kiosk crashed, this is the last recorded step before the crash.`,
+        };
+      } catch (_) {
+        return {
+          status: 'warn',
+          detail: `The previous vsWakeWord startup left an unreadable checkpoint: ${raw}`,
+        };
+      }
+    },
+  },
+  {
     id: 'audio.autoplay-policy',
     category: CATEGORY.AUDIO,
     title: 'Audio can play without a user tap',

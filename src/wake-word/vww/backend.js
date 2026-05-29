@@ -19,6 +19,7 @@ import { VwwInference, CHUNK_SAMPLES } from './inference.js';
 import { VwwEmbeddingInference } from './embedding-inference.js';
 import { loadVwwModel } from './models.js';
 import { acquireWebGpuDevice, WebGpuUnavailableError } from './gpu/device.js';
+import { clearVwwStartupBreadcrumb, checkpointVwwStartup } from './startup-breadcrumb.js';
 
 export { WebGpuUnavailableError };
 
@@ -163,6 +164,9 @@ export class VwwBackend {
     if (!keywordConfigs?.length) {
       throw new Error('VwwBackend.create needs at least one keyword');
     }
+    await checkpointVwwStartup('backend:create', {
+      models: keywordConfigs.map((cfg) => cfg.name),
+    });
     // WebGPU is mandatory for vsWakeWord too (matches OWW). Devices
     // without WebGPU surface the same toast suggesting microWakeWord.
     const device = await acquireWebGpuDevice();
@@ -173,6 +177,7 @@ export class VwwBackend {
     // gets one inference per arch.
     const entries = {};
     for (const cfg of keywordConfigs) {
+      await checkpointVwwStartup('model:load', { model: cfg.name });
       entries[cfg.name] = await loadVwwModel(cfg.name);
     }
     const archs = new Set(Object.values(entries).map(e => e.architecture));
@@ -209,6 +214,10 @@ export class VwwBackend {
     const stopClassifiers = {};
     for (const cfg of keywordConfigs) {
       const entry = entries[cfg.name];
+      await checkpointVwwStartup('model:add-keyword', {
+        model: cfg.name,
+        architecture,
+      });
       if (architecture === 'embedding') {
         // Classifier ONNX input shape carries T_emb (e.g. 9 for our 1.5s
         // training); fall back to manifest.input.shape[1] or default 9.
@@ -251,6 +260,10 @@ export class VwwBackend {
       + `(energy gate ${energyGateEnabled ? 'on' : 'off'}, `
       + `sensitivity=${sensitivityLabel}, sleep=${energy.sleep} wake=${energy.wake})`,
     );
+    clearVwwStartupBreadcrumb({
+      models: keywordConfigs.map((cfg) => cfg.name),
+      architecture,
+    });
     return new VwwBackend(inference, log, cutoffs, energyGateEnabled, sensitivityLabel, enableTimings, runtime, stopClassifiers);
   }
 

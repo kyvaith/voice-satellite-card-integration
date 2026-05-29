@@ -35,13 +35,7 @@ export async function acquireWebGpuDevice() {
 
   let adapter;
   try {
-    adapter = await navigator.gpu.requestAdapter({
-      // High-performance preference picks the discrete GPU on machines
-      // that have one; on integrated-only devices (most tablets) it's
-      // a no-op.  The OWW embedding model is small enough that integrated
-      // GPUs should still hit our 20-ms-per-chunk target.
-      powerPreference: 'high-performance',
-    });
+    adapter = await navigator.gpu.requestAdapter();
   } catch (e) {
     throw new WebGpuUnavailableError(`requestAdapter threw: ${e?.message || e}`);
   }

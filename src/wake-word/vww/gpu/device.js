@@ -8,6 +8,8 @@
  * degrading to a CPU JS path that can't keep up on slow tablets.
  */
 
+import { checkpointVwwStartup } from '../startup-breadcrumb.js';
+
 /** Custom error class so callers can distinguish "no WebGPU support"
  *  from generic init failures and emit a model-switch suggestion. */
 export class WebGpuUnavailableError extends Error {
@@ -27,6 +29,8 @@ export class WebGpuUnavailableError extends Error {
  * @returns {Promise<GPUDevice>}
  */
 export async function acquireWebGpuDevice() {
+  await checkpointVwwStartup('device:begin');
+
   if (typeof navigator === 'undefined' || !navigator.gpu) {
     throw new WebGpuUnavailableError(
       'navigator.gpu is undefined - WebGPU is not available in this environment',
@@ -35,13 +39,8 @@ export async function acquireWebGpuDevice() {
 
   let adapter;
   try {
-    adapter = await navigator.gpu.requestAdapter({
-      // High-performance preference picks the discrete GPU on machines
-      // that have one; on integrated-only devices (most tablets) it's
-      // a no-op.  The OWW embedding model is small enough that integrated
-      // GPUs should still hit our 20-ms-per-chunk target.
-      powerPreference: 'high-performance',
-    });
+    await checkpointVwwStartup('device:request-adapter');
+    adapter = await navigator.gpu.requestAdapter();
   } catch (e) {
     throw new WebGpuUnavailableError(`requestAdapter threw: ${e?.message || e}`);
   }
@@ -53,6 +52,9 @@ export async function acquireWebGpuDevice() {
 
   let device;
   try {
+    await checkpointVwwStartup('device:request-device', {
+      adapterInfo: summarizeAdapterInfo(adapter),
+    });
     // We don't need any non-default features.  The default storage-buffer
     // size limit is 128 MiB which is plenty for our ~1.3 MB of weights
     // plus per-chunk activations.
@@ -79,5 +81,30 @@ export async function acquireWebGpuDevice() {
     }
   }).catch(() => {});
 
+  await checkpointVwwStartup('device:ready', {
+    adapterInfo: summarizeAdapterInfo(adapter),
+    limits: summarizeDeviceLimits(device),
+  });
+
   return device;
+}
+
+function summarizeAdapterInfo(adapter) {
+  const info = adapter?.info || {};
+  return {
+    vendor: info.vendor || '',
+    architecture: info.architecture || '',
+    device: info.device || '',
+    description: info.description || '',
+  };
+}
+
+function summarizeDeviceLimits(device) {
+  const limits = device?.limits || {};
+  return {
+    maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+    maxComputeWorkgroupSizeX: limits.maxComputeWorkgroupSizeX,
+    maxComputeWorkgroupSizeY: limits.maxComputeWorkgroupSizeY,
+    maxComputeInvocationsPerWorkgroup: limits.maxComputeInvocationsPerWorkgroup,
+  };
 }
