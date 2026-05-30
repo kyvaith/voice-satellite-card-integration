@@ -20,7 +20,8 @@ const WAKE_MODE_DISABLED = 'disabled';
 
 /**
  * Read the wake-word detection mode from the integration's select entity.
- * Both `On Device (microWakeWord)` and `On Device (openWakeWord)` map
+ * `On Device (microWakeWord)`, `On Device (openWakeWord)`, and
+ * `On Device (vsWakeWord)` map
  * to WAKE_MODE_LOCAL - the engine choice is consumed downstream by
  * WakeWordManager via its own getEngine() helper.  The legacy `On Device`
  * string also routes here for backwards compat.
@@ -34,7 +35,8 @@ export function getWakeWordMode(session) {
   if (raw === 'Disabled') return WAKE_MODE_DISABLED;
   if (raw === 'On Device'
       || raw === 'On Device (microWakeWord)'
-      || raw === 'On Device (openWakeWord)') {
+      || raw === 'On Device (openWakeWord)'
+      || raw === 'On Device (vsWakeWord)') {
     return WAKE_MODE_LOCAL;
   }
   return WAKE_MODE_HA;

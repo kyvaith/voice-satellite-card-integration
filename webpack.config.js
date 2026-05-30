@@ -59,7 +59,7 @@ module.exports = (env, argv) => {
       output: {
         ...baseConfig.output,
         filename: '[name].js',
-        chunkFilename: 'voice-satellite-[name].js',
+        chunkFilename: `voice-satellite-[name].js?v=${pkg.version}`,
         path: frontendDir,
       },
       optimization: {
@@ -75,7 +75,7 @@ module.exports = (env, argv) => {
     output: {
       ...baseConfig.output,
       filename: '[name].js',
-      chunkFilename: 'voice-satellite-[name].js',
+      chunkFilename: `voice-satellite-[name].js?v=${pkg.version}`,
       path: frontendDir,
     },
     optimization: {

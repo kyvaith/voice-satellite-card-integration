@@ -1,11 +1,18 @@
 /**
  * Skin Registry
  *
- * Default skin is bundled; others are lazy-loaded on demand
- * via webpack code splitting to reduce main bundle size.
+ * All skins are bundled with the main card to avoid stale lazy-loaded
+ * chunk URLs after HACS updates.
  */
 
 import { defaultSkin } from './default.js';
+import { alexaSkin } from './alexa.js';
+import { googleHomeSkin } from './google-home.js';
+import { homeAssistantSkin } from './home-assistant.js';
+import { lensFlaresSkin } from './lens-flares.js';
+import { retroTerminalSkin } from './retro-terminal.js';
+import { siriSkin } from './siri.js';
+import { waveformSkin } from './waveform.js';
 
 /** Metadata for the editor dropdown (no CSS imported). */
 const SKIN_META = [
@@ -19,19 +26,16 @@ const SKIN_META = [
   { value: 'waveform', label: 'Waveform' },
 ];
 
-/** Dynamic loaders for non-default skins. */
-const SKIN_LOADERS = {
-  alexa: () => import(/* webpackChunkName: "skin-alexa" */ './alexa.js'),
-  'google-home': () => import(/* webpackChunkName: "skin-google-home" */ './google-home.js'),
-  'home-assistant': () => import(/* webpackChunkName: "skin-home-assistant" */ './home-assistant.js'),
-  'lens-flares': () => import(/* webpackChunkName: "skin-lens-flares" */ './lens-flares.js'),
-  'retro-terminal': () => import(/* webpackChunkName: "skin-retro-terminal" */ './retro-terminal.js'),
-  siri: () => import(/* webpackChunkName: "skin-siri" */ './siri.js'),
-  waveform: () => import(/* webpackChunkName: "skin-waveform" */ './waveform.js'),
+const SKINS = {
+  default: defaultSkin,
+  alexa: alexaSkin,
+  'google-home': googleHomeSkin,
+  'home-assistant': homeAssistantSkin,
+  'lens-flares': lensFlaresSkin,
+  'retro-terminal': retroTerminalSkin,
+  siri: siriSkin,
+  waveform: waveformSkin,
 };
-
-/** Cache of loaded skins. */
-const _cache = { default: defaultSkin };
 
 /**
  * Synchronous skin lookup. Returns the cached skin or default as fallback.
@@ -39,7 +43,7 @@ const _cache = { default: defaultSkin };
  * @returns {object} skin definition
  */
 export function getSkin(id) {
-  return _cache[id] || defaultSkin;
+  return SKINS[id] || defaultSkin;
 }
 
 /**
@@ -48,22 +52,7 @@ export function getSkin(id) {
  * @returns {Promise<object>} skin definition
  */
 export async function loadSkin(id) {
-  if (_cache[id]) return _cache[id];
-  const loader = SKIN_LOADERS[id];
-  if (!loader) return defaultSkin;
-  try {
-    const mod = await loader();
-    const skin = Object.values(mod)[0];
-    if (!skin || !skin.id || !skin.css) {
-      console.warn(`[voice-satellite] Skin "${id}" has invalid structure, using default`);
-      return defaultSkin;
-    }
-    _cache[id] = skin;
-    return skin;
-  } catch (e) {
-    console.warn(`[voice-satellite] Failed to load skin "${id}": ${e.message || e}`);
-    return defaultSkin;
-  }
+  return getSkin(id);
 }
 
 /**

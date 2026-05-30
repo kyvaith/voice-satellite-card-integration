@@ -25,6 +25,7 @@ import { StartConversationManager } from '../start-conversation';
 import { ShowManager } from '../show';
 import { MediaPlayerManager } from '../media-player';
 import { getSelectEntityId, getNumberState, getSelectState, getSwitchState } from '../shared/satellite-state.js';
+import { WakeWordManager } from '../wake-word';
 import { ScreensaverManager } from '../screensaver';
 import { DiagnosticsManager } from '../diagnostics';
 import { ToastManager } from '../toast';
@@ -486,10 +487,11 @@ export class VoiceSatelliteSession {
       this._hass, this._config.satellite_entity,
       'wake_word_detection', 'On Device (microWakeWord)',
     );
-    // Accept the legacy bare label and both engine-specific variants.
+    // Accept the legacy bare label and all engine-specific variants.
     return raw === 'On Device'
       || raw === 'On Device (microWakeWord)'
-      || raw === 'On Device (openWakeWord)';
+      || raw === 'On Device (openWakeWord)'
+      || raw === 'On Device (vsWakeWord)';
   }
 
   /**
@@ -520,15 +522,12 @@ export class VoiceSatelliteSession {
   }
 
   /**
-   * Dynamically load the wake word module and create the manager.
-   * Cached - only loads the chunk once.
-   * @returns {Promise<import('../wake-word').WakeWordManager>}
+   * Create the wake word manager. Wake-word code is bundled into the main
+   * card bundle; only the inference worker remains a separate script.
+   * @returns {Promise<WakeWordManager>}
    */
   async _loadWakeWordModule() {
     if (this._wakeWord) return this._wakeWord;
-    const { WakeWordManager } = await import(
-      /* webpackChunkName: "wake-word" */ '../wake-word'
-    );
     this._wakeWord = new WakeWordManager(this);
     return this._wakeWord;
   }
