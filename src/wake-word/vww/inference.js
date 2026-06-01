@@ -109,11 +109,13 @@ export class VwwInference {
     if (ctcConfig) {
       // Output shape is (1, T_out, V).  compiled.outputs[0].dims has
       // it if the trainer wrote a concrete shape (we do).
-      const outShape = compiled.outputs?.[0]?.dims
+      const outputId = compiled.outputIds?.[0];
+      const outShape = (outputId != null ? compiled.tensors?.[outputId]?.shape : null)
+        || compiled.outputs?.[0]?.dims
         || compiled.outputs?.[0]?.shape
         || null;
       try {
-        keyword.ctcDecoder = new CtcDecoder(ctcConfig, outShape || [1, 49, ctcConfig.vocab_size || 52]);
+        keyword.ctcDecoder = new CtcDecoder(ctcConfig, outShape || [1, 64, ctcConfig.vocab_size || 52]);
       } catch (err) {
         throw new Error(`CTC decoder init failed for keyword "${name}": ${err.message}`);
       }
