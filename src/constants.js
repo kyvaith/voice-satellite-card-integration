@@ -53,6 +53,11 @@ export const Timing = {
   ASK_QUESTION_CLEANUP: 2000,
   ASK_QUESTION_STT_SAFETY: 30000,
   TOKEN_REFRESH_INTERVAL: 240_000,
+  // Safety net: if the STT stage goes silent (armed at stt-start and
+  // re-armed at stt-vad-end - e.g. a crashed Wyoming STT service sends no
+  // stt-end / intent / tts / run-end / error), tear the stuck STT
+  // interaction down after this long so the UI doesn't linger forever.
+  VAD_WATCHDOG: 60000,
   MAX_RETRY_DELAY: 30000,
   RETRY_BASE_DELAY: 5000,
   VISIBILITY_DEBOUNCE: 500,

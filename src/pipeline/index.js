@@ -22,6 +22,7 @@ import {
   handleTtsEnd,
   handleRunEnd,
   handleError,
+  handleVadWatchdog,
 } from './events.js';
 
 const MUTE_POLL_INTERVAL = 2000;
@@ -70,6 +71,10 @@ export class PipelineManager {
     // making them unplayable.  Restarting allocates a fresh token.
     this._tokenRefreshTimer = null;
     this._reconnectTimeout = null;
+
+    // Watchdog armed on stt-start and stt-vad-end; fires if the server
+    // sends no further pipeline event (see armVadWatchdog / handleVadWatchdog).
+    this._vadWatchdogTimer = null;
 
     // Generation counter - incremented by stop() so that a stale start()
     // (e.g. from a throttled background-tab timeout) can detect it was
@@ -616,8 +621,33 @@ export class PipelineManager {
     }
   }
 
+  /**
+   * Arm the VAD watchdog.  Called on stt-start and stt-vad-end; cleared by
+   * handlePipelineMessage as soon as any other pipeline event arrives.
+   * If it fires, the STT stage went silent (e.g. a crashed Wyoming STT
+   * service) - see handleVadWatchdog for the recovery.  The arm/clear log
+   * lines only surface when debug logging is enabled.
+   */
+  armVadWatchdog() {
+    this.clearVadWatchdog();
+    this._log.log('pipeline', `VAD watchdog armed (${Timing.VAD_WATCHDOG}ms)`);
+    this._vadWatchdogTimer = setTimeout(() => {
+      this._vadWatchdogTimer = null;
+      handleVadWatchdog(this);
+    }, Timing.VAD_WATCHDOG);
+  }
+
+  clearVadWatchdog() {
+    if (this._vadWatchdogTimer) {
+      clearTimeout(this._vadWatchdogTimer);
+      this._vadWatchdogTimer = null;
+      this._log.log('pipeline', 'VAD watchdog cleared');
+    }
+  }
+
   _clearScheduledWork() {
     this._clearTokenRefreshTimer();
+    this.clearVadWatchdog();
 
     if (this._restartTimeout) {
       clearTimeout(this._restartTimeout);

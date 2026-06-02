@@ -576,13 +576,28 @@ export function handlePipelineMessage(session, message) {
   const timestamp = message.timestamp ? message.timestamp.split('T')[1].split('.')[0] : '';
   session.logger.log('event', `${timestamp} ${eventType} ${JSON.stringify(eventData).substring(0, 500)}`);
 
+  // Any pipeline event clears the VAD watchdog; the stt-start and
+  // stt-vad-end cases below re-arm it. This is what lets the watchdog catch
+  // an STT service (e.g. a Wyoming provider) that crashes mid-turn: it's
+  // armed at stt-start, cleared by the next event (normally stt-vad-start),
+  // and re-armed at stt-vad-end. If the expected follow-up event never
+  // arrives in either window, the timer fires and tears the stuck
+  // interaction down.
+  session.pipeline.clearVadWatchdog();
+
   switch (eventType) {
     case 'run-start': session.pipeline.handleRunStart(eventData); break;
     case 'wake_word-start': session.pipeline.handleWakeWordStart(); break;
     case 'wake_word-end': session.pipeline.handleWakeWordEnd(eventData); break;
-    case 'stt-start': setState(session, State.STT); break;
+    case 'stt-start':
+      setState(session, State.STT);
+      session.pipeline.armVadWatchdog();
+      break;
     case 'stt-vad-start': session.logger.log('event', 'VAD: speech started'); break;
-    case 'stt-vad-end': session.logger.log('event', 'VAD: speech ended'); break;
+    case 'stt-vad-end':
+      session.logger.log('event', 'VAD: speech ended');
+      session.pipeline.armVadWatchdog();
+      break;
     case 'stt-end': session.pipeline.handleSttEnd(eventData); break;
     case 'intent-start':
       setState(session, State.INTENT);

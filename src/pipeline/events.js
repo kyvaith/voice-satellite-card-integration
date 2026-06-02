@@ -478,6 +478,49 @@ export function handleRunEnd(mgr) {
   mgr.finishRunEnd();
 }
 
+/**
+ * VAD watchdog: the STT stage normally emits stt-vad-start / stt-vad-end
+ * and then stt-end, but the STT service (e.g. a Wyoming provider) can crash
+ * mid-turn and go silent, leaving the STT UI (blur overlay, bar, chat) stuck
+ * on screen forever.  Armed on stt-start and re-armed on stt-vad-end, then
+ * cleared by the next pipeline event (see handlePipelineMessage); if it
+ * actually fires, no further event ever arrived, so we tear the stuck
+ * interaction down and warn the user.
+ * @param {import('./index.js').PipelineManager} mgr
+ */
+export function handleVadWatchdog(mgr) {
+  // Race guard: a late event may have moved us out of the interaction
+  // between the timer firing and this running.
+  if (!INTERACTING_STATES.includes(mgr.card.currentState)) {
+    mgr.log.log('pipeline', 'VAD watchdog fired but no longer interacting - ignoring');
+    return;
+  }
+
+  mgr.log.error('pipeline', 'VAD watchdog: STT stage silent for 60s - tearing down stuck interaction');
+
+  // Auto-dismissable warning (warn severity clears itself after 8s).
+  mgr.card.toast?.show({
+    id: 'pipeline.vad-watchdog',
+    severity: 'warn',
+    category: pipelineCategory(mgr),
+    description: 'No response from the server after you finished speaking. The pipeline may be stuck. Listening again.',
+    action: { label: 'Open Diagnostics', type: 'diagnostics' },
+  });
+
+  // Mirror the expected-error cleanup: drop the interaction UI and resume
+  // any media we paused at wake-word time.
+  mgr.card.ui.hideBlurOverlay(BlurReason.PIPELINE);
+  mgr.card.ui.hideBar();
+  mgr.card.chat.clear();
+  mgr.shouldContinue = false;
+  mgr.continueConversationId = null;
+  mgr.card.mediaPlayer.resumeAfterInterrupt();
+  mgr.card.setState(State.IDLE);
+
+  // Restart so the satellite returns to listening for the wake word.
+  mgr.restart(0);
+}
+
 /** @param {import('./index.js').PipelineManager} mgr */
 export function handleError(mgr, errorData) {
   const errorCode = errorData.code || '';
