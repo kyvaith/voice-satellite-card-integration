@@ -680,9 +680,13 @@ export function transposeShader(inShape, outShape, perm) {
 
 /**
  * REDUCE_MAX over ALL axes - produces a single-element scalar output.
- * Single-thread reduction (one workgroup, one invocation iterating the
- * whole input) since our use case is tiny (256 elements).  If we ever
- * need REDUCE_MAX over a subset of axes, a different shader is required.
+ * Parallel workgroup reduction: 64 threads each take a stride of the
+ * input to find a local max, then a tree-reduce in workgroup-shared
+ * memory collapses them to one value.  Dispatched as a single workgroup
+ * (the build site passes elementCount=1 so dispatchX=1) which is fine
+ * here because all 64 threads cooperate within that one workgroup.
+ * For our typical N (a few hundred to a few thousand), this beats the
+ * single-thread version by avoiding the serial inner loop.
  */
 export function reduceMaxAllShader(numElements) {
   return /* wgsl */`
@@ -690,16 +694,43 @@ export function reduceMaxAllShader(numElements) {
     @group(0) @binding(1) var<storage, read_write> outputBuf: array<f32>;
 
     const N: u32 = ${numElements}u;
+    const WG: u32 = 64u;
 
-    @compute @workgroup_size(1)
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-      if (gid.x != 0u) { return; }
-      var mx: f32 = inputBuf[0];
-      for (var i: u32 = 1u; i < N; i = i + 1u) {
+    var<workgroup> partial: array<f32, 64>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+      let tid: u32 = lid.x;
+
+      // Stride-loop: each thread visits every WG-th element.
+      // Seed with the thread's first in-range value, or input[0] when N<=tid.
+      var mx: f32;
+      if (tid < N) {
+        mx = inputBuf[tid];
+      } else {
+        mx = inputBuf[0];
+      }
+      var i: u32 = tid + WG;
+      while (i < N) {
         let v: f32 = inputBuf[i];
         if (v > mx) { mx = v; }
+        i = i + WG;
       }
-      outputBuf[0] = mx;
+      partial[tid] = mx;
+      workgroupBarrier();
+
+      // Tree reduction in shared memory: 64 -> 32 -> 16 -> ... -> 1.
+      var stride: u32 = WG >> 1u;
+      while (stride > 0u) {
+        if (tid < stride) {
+          let other: f32 = partial[tid + stride];
+          if (other > partial[tid]) { partial[tid] = other; }
+        }
+        workgroupBarrier();
+        stride = stride >> 1u;
+      }
+
+      if (tid == 0u) { outputBuf[0] = partial[0]; }
     }
   `;
 }

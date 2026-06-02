@@ -1172,17 +1172,17 @@ export class GpuModelRunner {
   }
 
   /**
-   * Run the GPU pipeline over the supplied input data.  Returns a
-   * Promise<Float32Array> of the output tensor; the same view is
-   * recycled across calls so callers must consume it before invoking
-   * again.
+   * Submit GPU work for the supplied input.  Returns synchronously after
+   * the command buffer is queued — the GPU runs in the background.  Use
+   * readOutput() (or its private companion _awaitReadback() inside invoke())
+   * to fetch the result.  Allows the caller to overlap CPU work (e.g.
+   * extracting log-mel features for the next window) with this inference.
    * @param {Float32Array} input
-   * @returns {Promise<Float32Array>}
    */
-  async invoke(input) {
+  submitInference(input) {
     const firstInvoke = this._invokeCount === 0;
     if (firstInvoke) {
-      await checkpointVwwStartup('invoke:first-submit', {
+      checkpointVwwStartup('invoke:first-submit', {
         outputSize: this._outputSize,
         inputLength: input.length,
       });
@@ -1192,6 +1192,19 @@ export class GpuModelRunner {
     this.encode(enc);
     this.encodeOutputReadback(enc);
     this._device.queue.submit([enc.finish()]);
+  }
+
+  /**
+   * Run the GPU pipeline over the supplied input data.  Returns a
+   * Promise<Float32Array> of the output tensor; the same view is
+   * recycled across calls so callers must consume it before invoking
+   * again.
+   * @param {Float32Array} input
+   * @returns {Promise<Float32Array>}
+   */
+  async invoke(input) {
+    const firstInvoke = this._invokeCount === 0;
+    this.submitInference(input);
 
     if (firstInvoke && typeof this._device.queue.onSubmittedWorkDone === 'function') {
       await checkpointVwwStartup('invoke:first-wait');
