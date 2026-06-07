@@ -229,7 +229,7 @@ export class TtsManager {
       // Diagnostics panel will call out.
       this._card.toast?.show({
         id: 'tts.playback-failed',
-        severity: 'error',
+        severity: 'warn',
         category: 'Text-to-speech',
         description: 'Audio could not be played. Often caused by mixed-content TTS URLs or autoplay being blocked.',
         action: { label: 'Open Diagnostics', type: 'diagnostics' },
