@@ -117,58 +117,9 @@
         29,
         9,
         15,
-        2,
         32,
         5,
-        23,
-        20,
-        3
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        2,
-        2,
-        32,
-        5,
-        23,
-        20,
-        3
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        32,
-        5,
-        23,
-        20
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        2,
-        32,
-        5,
-        23,
-        20
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        32,
-        5,
+        3,
         23,
         20,
         3
@@ -185,71 +136,6 @@
         23,
         20,
         3
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        2,
-        32,
-        8,
-        3,
-        23,
-        20
-      ],
-      [
-        18,
-        21,
-        29,
-        15,
-        2,
-        32,
-        5,
-        3,
-        23,
-        20,
-        3
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        32,
-        5,
-        3,
-        23,
-        20,
-        3
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        2,
-        2,
-        32,
-        5,
-        3,
-        23
-      ],
-      [
-        18,
-        21,
-        29,
-        9,
-        15,
-        9,
-        2,
-        32,
-        5,
-        3,
-        23
       ],
       [
         18,
@@ -271,12 +157,26 @@
         29,
         9,
         15,
+        32,
+        3,
+        23,
+        20,
+        3
+      ],
+      [
+        18,
+        21,
+        29,
+        9,
+        15,
+        2,
         2,
         32,
         5,
         3,
         23,
-        20
+        20,
+        3
       ]
     ],
     "wake_word_target_phonemes": [
@@ -296,65 +196,16 @@
       ],
       [
         "o",
-        "?",
+        "ʊ",
         "k",
         "e",
-        "?",
-        " ",
+        "ɪ",
         "n",
-        "?",
+        "ɑ",
+        "ː",
         "b",
         "u",
-        "?"
-      ],
-      [
-        "o",
-        "?",
-        "k",
-        "e",
-        "?",
-        " ",
-        " ",
-        "n",
-        "?",
-        "b",
-        "u",
-        "?"
-      ],
-      [
-        "o",
-        "?",
-        "k",
-        "e",
-        "?",
-        "n",
-        "?",
-        "b",
-        "u"
-      ],
-      [
-        "o",
-        "?",
-        "k",
-        "e",
-        "?",
-        " ",
-        "n",
-        "?",
-        "b",
-        "u"
-      ],
-      [
-        "o",
-        "?",
-        "k",
-        "e",
-        "?",
-        "n",
-        "?",
-        "b",
-        "u",
-        "?"
+        "ː"
       ],
       [
         "o",
@@ -368,71 +219,6 @@
         "b",
         "u",
         "ː"
-      ],
-      [
-        "o",
-        "ʊ",
-        "k",
-        "e",
-        "ɪ",
-        " ",
-        "n",
-        "æ",
-        "ː",
-        "b",
-        "u"
-      ],
-      [
-        "o",
-        "ʊ",
-        "k",
-        "ɪ",
-        " ",
-        "n",
-        "ɑ",
-        "ː",
-        "b",
-        "u",
-        "ː"
-      ],
-      [
-        "o",
-        "ʊ",
-        "k",
-        "e",
-        "ɪ",
-        "n",
-        "ɑ",
-        "ː",
-        "b",
-        "u",
-        "ː"
-      ],
-      [
-        "o",
-        "ʊ",
-        "k",
-        "e",
-        "ɪ",
-        " ",
-        " ",
-        "n",
-        "ɑ",
-        "ː",
-        "b"
-      ],
-      [
-        "o",
-        "ʊ",
-        "k",
-        "e",
-        "ɪ",
-        "e",
-        " ",
-        "n",
-        "ɑ",
-        "ː",
-        "b"
       ],
       [
         "o",
@@ -454,98 +240,65 @@
         "k",
         "e",
         "ɪ",
+        "n",
+        "ː",
+        "b",
+        "u",
+        "ː"
+      ],
+      [
+        "o",
+        "ʊ",
+        "k",
+        "e",
+        "ɪ",
+        " ",
         " ",
         "n",
         "ɑ",
         "ː",
         "b",
-        "u"
-      ]
-    ],
-    "wake_word_target_anchors": [
-      [
-        6,
-        7
-      ],
-      [
-        6,
-        7
-      ],
-      [
-        7,
-        8
-      ],
-      [
-        5,
-        6
-      ],
-      [
-        6,
-        7
-      ],
-      [
-        5,
-        6
-      ],
-      [
-        6,
-        7
-      ],
-      [
-        6,
-        7
-      ],
-      [
-        5,
-        6
-      ],
-      [
-        5,
-        6
-      ],
-      [
-        7,
-        8
-      ],
-      [
-        7,
-        8
-      ],
-      [
-        6,
-        7
-      ],
-      [
-        6,
-        7
+        "u",
+        "ː"
       ]
     ],
     "max_edit_distance": 1,
     "wake_word_trail_tolerance": 3,
-    "min_matched_confidence": 4.5
+    "min_matched_confidence": 3.2
   },
   "runtime": {
-    "required_hits": 3,
-    "hit_mode": "consecutive",
-    "high_confidence_bypass": 6.8,
+    "required_hits": 2,
     "cooldown_ms": 2000,
-    "high_confidence_bypass_min_hits": 2
+    "hit_mode": "consecutive",
+    "high_confidence_bypass": 5.8,
+    "high_confidence_bypass_min_hits": 1
   },
-  "best_epoch": 124,
+  "best_epoch": 76,
   "best_val": {
-    "loss": 0.8654585480690002,
-    "exact_decode_acc": 0.509,
-    "wake_detect_rate": 0.7077570655441973,
-    "wake_fp_rate": 0.0047789725209080045,
-    "wake_pos_total": 3326,
-    "wake_fp_total": 1674,
-    "silence_nonblank_rate": 0.014705882352941176,
-    "silence_nonblank_total": 340,
-    "silence_nonblank_hits": 5,
-    "utterance_wake_recall": 0.7269874476987448,
-    "utterance_fp_rate": 0.005669737774627924,
-    "utterance_pos_total": 2868,
-    "utterance_fp_total": 1411
+    "loss": 1.6483372390270232,
+    "exact_decode_acc": 0.5912,
+    "wake_detect_rate": 0.6180836707152496,
+    "wake_fp_rate": 0.0005685048322910744,
+    "wake_pos_total": 1482,
+    "wake_fp_total": 3518,
+    "silence_nonblank_rate": 0.09884959522795057,
+    "silence_nonblank_total": 2347,
+    "silence_nonblank_hits": 232,
+    "utterance_wake_recall": 0.7254901960784313,
+    "utterance_fp_rate": 0.001015744032503809,
+    "utterance_pos_total": 816,
+    "utterance_fp_total": 1969,
+    "selector_recall_rate": 0.709379217273954,
+    "selector_utterance_recall_weight": 0.85,
+    "adaptive_positive_boost_this_epoch": 1.0,
+    "adaptive_positive_boost_next_epoch": 1.0627007316910373,
+    "adaptive_recall_fpr_cap": 0.001,
+    "adaptive_recall_start_epoch": 40,
+    "adaptive_recall_min_selector_recall": 0.55,
+    "adaptive_recall_max_silence_nonblank": 0.1,
+    "adaptive_recall_max_boost": 1.12
   },
-  "deployed_from": "data/runs/ok_nabu_v29/checkpoints/ok_nabu-ctc-best-ep124.pt"
+  "deployed_from": "data/runs/ok_nabu_v32/checkpoints/ok_nabu-ctc-bestrecall-ep076.pt",
+  "manifest_source": "public/models/ok_nabu_v32_adaptive_ep056_bestrecall/ok_nabu.json",
+  "version_note": "ok_nabu v32 adaptive ep076 bestrecall using the same manifest targets/runtime knobs as v32 adaptive ep056 bestrecall."
 }
