@@ -63,6 +63,12 @@ function runtimeModeFromManifest(cfg) {
   const requiredHits = cfg && typeof cfg.required_hits === 'number' && cfg.required_hits > 0
     ? Math.max(1, Math.floor(cfg.required_hits))
     : 0;
+  const targetRequiredHits = Array.isArray(cfg?.target_required_hits)
+    ? cfg.target_required_hits.map((value) => {
+        const n = Number(value);
+        return Number.isFinite(n) && n > 0 ? Math.max(1, Math.floor(n)) : null;
+      })
+    : null;
   const cooldown = cfg && typeof cfg.cooldown_ms === 'number' && cfg.cooldown_ms > 0
     ? cfg.cooldown_ms
     : COOLDOWN_MS;
@@ -79,6 +85,7 @@ function runtimeModeFromManifest(cfg) {
     ? {
         mode: 'counter',
         requiredHits,
+        targetRequiredHits,
         hitMode,
         highConfidenceBypass,
         highConfidenceBypassMinHits,
@@ -87,12 +94,34 @@ function runtimeModeFromManifest(cfg) {
     : { mode: 'borderline', cooldownMs: cooldown };
 }
 
+function requiredHitsForTarget(mode, targetIndex) {
+  const fallback = Math.max(1, Math.floor(mode?.requiredHits || 1));
+  if (!Number.isInteger(targetIndex) || targetIndex < 0) return fallback;
+  const hits = mode?.targetRequiredHits;
+  const targetHits = Array.isArray(hits) ? hits[targetIndex] : null;
+  return Number.isFinite(targetHits) ? targetHits : fallback;
+}
+
+function bypassMinHitsForTarget(mode, targetIndex, requiredHits) {
+  const fallback = Math.max(1, Math.floor(mode?.highConfidenceBypassMinHits || 1));
+  if (!Number.isInteger(targetIndex) || targetIndex < 0) return fallback;
+  const hits = mode?.targetRequiredHits;
+  const targetHits = Array.isArray(hits) ? hits[targetIndex] : null;
+  if (Number.isFinite(targetHits) && targetHits > mode.requiredHits) {
+    return Math.max(fallback, requiredHits);
+  }
+  return fallback;
+}
+
 function formatRuntimeStatus(status, triggerType = null) {
   if (!status || status.mode !== 'counter') return '';
   const parts = [];
   if (triggerType) parts.push(`runtime_type=${triggerType}`);
   if (Number.isFinite(status.hits) && Number.isFinite(status.requiredHits)) {
     parts.push(`runtime_hits=${status.hits}/${status.requiredHits}`);
+  }
+  if (Number.isInteger(status.matchedTargetIndex) && status.matchedTargetIndex >= 0) {
+    parts.push(`runtime_target=${status.matchedTargetIndex + 1}`);
   }
   if (typeof status.highConfidenceBypass === 'number' && Number.isFinite(status.highConfidenceBypass)) {
     parts.push(`runtime_bypass=${status.highConfidenceBypass.toFixed(2)}`);
@@ -140,7 +169,7 @@ export class VwwBackend {
     this._runtimeStatus = {};
     for (const name of this._keywordNames) {
       this._runtimeMode[name] = runtimeModeFromManifest(runtime?.[name]);
-      this._hitCounters[name] = 0;
+      this._hitCounters[name] = { hits: 0, targetIndex: -1 };
       this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false);
     }
 
@@ -273,7 +302,13 @@ export class VwwBackend {
         const bypassMinHits = typeof r.high_confidence_bypass_min_hits === 'number'
           ? `, bypass_hits=${Math.max(1, Math.floor(r.high_confidence_bypass_min_hits))}`
           : '';
-        return `${c.name}(c=${cutoffs[c.name].toFixed(3)}, hits=${r.required_hits}${bypass}${bypassMinHits})`;
+        const targetHits = Array.isArray(r.target_required_hits)
+          ? `, target_hits=[${r.target_required_hits.map((value) => {
+              const n = Number(value);
+              return Number.isFinite(n) && n > 0 ? Math.max(1, Math.floor(n)) : '-';
+            }).join(',')}]`
+          : '';
+        return `${c.name}(c=${cutoffs[c.name].toFixed(3)}, hits=${r.required_hits}${targetHits}${bypass}${bypassMinHits})`;
       }
       return `${c.name}(c=${cutoffs[c.name].toFixed(3)}, borderline)`;
     }).join(', ');
@@ -617,8 +652,15 @@ export class VwwBackend {
    * counters live in this._hitCounters keyed by name.
    */
   _gateCounter(name, score, cutoff, mode, ctcInfo = null) {
+    const matchedTargetIndex = Number.isInteger(ctcInfo?.matchedTargetIndex)
+      ? ctcInfo.matchedTargetIndex
+      : -1;
+    const requiredHits = requiredHitsForTarget(mode, matchedTargetIndex);
+    const bypassMinHits = bypassMinHitsForTarget(mode, matchedTargetIndex, requiredHits);
     if (score > cutoff) {
-      this._hitCounters[name] = (this._hitCounters[name] || 0) + 1;
+      const prev = this._hitCounters[name] || { hits: 0, targetIndex: -1 };
+      const nextHits = prev.targetIndex === matchedTargetIndex ? prev.hits + 1 : 1;
+      this._hitCounters[name] = { hits: nextHits, targetIndex: matchedTargetIndex };
       const bypass = mode?.highConfidenceBypass;
       const isHighConfidence = (
         typeof bypass === 'number'
@@ -626,26 +668,25 @@ export class VwwBackend {
         && typeof ctcInfo.matchedConfidence === 'number'
         && ctcInfo.matchedConfidence >= bypass
       );
-      const bypassMinHits = Math.max(1, Math.floor(mode?.highConfidenceBypassMinHits || 1));
-      if (isHighConfidence && this._hitCounters[name] >= bypassMinHits) {
-        this._runtimeStatus[name] = this._makeRuntimeStatus(name, this._hitCounters[name], true, true);
-        this._hitCounters[name] = 0;
+      if (isHighConfidence && nextHits >= bypassMinHits) {
+        this._runtimeStatus[name] = this._makeRuntimeStatus(name, nextHits, true, true, requiredHits, matchedTargetIndex, bypassMinHits);
+        this._hitCounters[name] = { hits: 0, targetIndex: -1 };
         return 'bypass';
       }
-      if (this._hitCounters[name] >= mode.requiredHits) {
-        this._runtimeStatus[name] = this._makeRuntimeStatus(name, mode.requiredHits, false, isHighConfidence);
-        this._hitCounters[name] = 0;
+      if (nextHits >= requiredHits) {
+        this._runtimeStatus[name] = this._makeRuntimeStatus(name, requiredHits, false, isHighConfidence, requiredHits, matchedTargetIndex, bypassMinHits);
+        this._hitCounters[name] = { hits: 0, targetIndex: -1 };
         return 'counter';
       }
-      this._runtimeStatus[name] = this._makeRuntimeStatus(name, this._hitCounters[name], false, isHighConfidence);
+      this._runtimeStatus[name] = this._makeRuntimeStatus(name, nextHits, false, isHighConfidence, requiredHits, matchedTargetIndex, bypassMinHits);
     } else {
-      this._hitCounters[name] = 0;
-      this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false, false);
+      this._hitCounters[name] = { hits: 0, targetIndex: -1 };
+      this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false, false, requiredHits, matchedTargetIndex, bypassMinHits);
     }
     return null;
   }
 
-  _makeRuntimeStatus(name, hits = 0, bypassed = false, highConfidence = false) {
+  _makeRuntimeStatus(name, hits = 0, bypassed = false, highConfidence = false, requiredHits = null, matchedTargetIndex = -1, bypassMinHits = null) {
     const mode = this._runtimeMode[name] || { mode: 'borderline', cooldownMs: COOLDOWN_MS };
     if (mode.mode !== 'counter') {
       return { mode: 'borderline', cooldownMs: mode.cooldownMs };
@@ -654,9 +695,14 @@ export class VwwBackend {
       mode: 'counter',
       hitMode: mode.hitMode || 'consecutive',
       hits,
-      requiredHits: mode.requiredHits,
+      requiredHits: Number.isFinite(requiredHits) ? requiredHits : mode.requiredHits,
+      baseRequiredHits: mode.requiredHits,
+      matchedTargetIndex,
       highConfidenceBypass: mode.highConfidenceBypass,
-      highConfidenceBypassMinHits: mode.highConfidenceBypassMinHits,
+      highConfidenceBypassMinHits: Number.isFinite(bypassMinHits)
+        ? bypassMinHits
+        : mode.highConfidenceBypassMinHits,
+      baseHighConfidenceBypassMinHits: mode.highConfidenceBypassMinHits,
       highConfidence,
       bypassed,
       cooldownMs: mode.cooldownMs,

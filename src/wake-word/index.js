@@ -64,6 +64,9 @@ function formatWakeRuntimeStatus(result) {
   if (Number.isFinite(status.hits) && Number.isFinite(status.requiredHits)) {
     bits.push(`runtime_hits=${status.hits}/${status.requiredHits}`);
   }
+  if (Number.isInteger(status.matchedTargetIndex) && status.matchedTargetIndex >= 0) {
+    bits.push(`runtime_target=${status.matchedTargetIndex + 1}`);
+  }
   if (typeof status.highConfidenceBypass === 'number' && Number.isFinite(status.highConfidenceBypass)) {
     bits.push(`runtime_bypass=${status.highConfidenceBypass.toFixed(2)}`);
   }

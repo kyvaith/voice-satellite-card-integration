@@ -174,6 +174,7 @@ export class VwwInference {
           phonemes: kw.ctcDecoder.toPhonemes(info.decoded),
           minEditDistance: info.minEditDistance,
           matched: info.matched,
+          matchedTargetIndex: info.matchedTargetIndex,
           matchedConfidence: info.matchedConfidence,
           totalConfidence: info.totalConfidence,
           gateThreshold: info.gateThreshold,

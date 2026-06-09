@@ -12,6 +12,7 @@
 
 import { WorkerProxyBackend } from './worker/proxy-backend.js';
 import { describeAudioInputDevices, describeSelectedAudioTrack } from '../audio/devices.js';
+import { loadVwwModelParams } from './vww/manifest-cache.js';
 
 const CHUNK_SIZE = 1280; // 80ms @ 16 kHz
 const TARGET_RATE = 16000;
@@ -428,6 +429,12 @@ export class WakeWordTestSession {
         'info',
         `VWW GPU shader mode: ${this._vwwGpuCompatibilityMode ? 'compatibility Conv shaders' : 'standard high-performance shaders'}`,
       );
+      try {
+        const params = await loadVwwModelParams(this._modelName);
+        this._reportVwwModelParams(this._modelName, params);
+      } catch (_) {
+        this._emitLog('warn', `VWW manifest report unavailable for "${this._modelName}"`);
+      }
     }
     this._inference = await WorkerProxyBackend.create({
       engine: ['oww', 'vww', 'mww'].includes(this._engine) ? this._engine : 'mww',
@@ -533,7 +540,8 @@ export class WakeWordTestSession {
                           && Number.isFinite(ctcEntry.gateThreshold))
                 ? ` gate=${ctcEntry.gateThreshold.toFixed(2)}`
                 : '';
-              ctcBits = ` decoded=[${ctcEntry.phonemes.join(' ')}] ed=${ed}${mc}${tc}${gt}`;
+              const target = this._formatCtcTargetInfo(ctcEntry);
+              ctcBits = ` decoded=[${ctcEntry.phonemes.join(' ')}] ed=${ed}${target}${mc}${tc}${gt}`;
             }
             this._emitLog(
               'trigger',
@@ -573,6 +581,7 @@ export class WakeWordTestSession {
               const gt = (typeof gateThreshold === 'number' && Number.isFinite(gateThreshold))
                 ? ` gate=${gateThreshold.toFixed(2)}`
                 : '';
+              const target = this._formatCtcTargetInfo(info);
               // Explicit reason: why didn't this near-miss fire?  Helps
               // the user distinguish "model decoded wrong phonemes" from
               // "model decoded right phonemes but gate rejected it".
@@ -593,7 +602,7 @@ export class WakeWordTestSession {
               const runtimeBits = this._formatVwwRuntimeInfo(result, name, null);
               this._emitLog(
                 'diag',
-                `CTC near-miss "${name}" ed=${ed}${mc}${tc}${gt}`
+                `CTC near-miss "${name}" ed=${ed}${target}${mc}${tc}${gt}`
                 + `${runtimeBits ? ` ${runtimeBits}` : ''}${reason} `
                 + `decoded=[${info.phonemes.join(' ')}]`,
               );
@@ -929,6 +938,93 @@ export class WakeWordTestSession {
     return parts.join(' ');
   }
 
+  _reportVwwModelParams(modelName, params) {
+    if (!params || params.architecture !== 'ctc' || !params.ctc) return;
+    const ctc = params.ctc || {};
+    const runtime = params.runtime || {};
+    const targets = Array.isArray(ctc.wake_word_targets) ? ctc.wake_word_targets : [];
+    const targetCount = targets.length;
+    const maxEd = Number.isFinite(Number(ctc.max_edit_distance))
+      ? Number(ctc.max_edit_distance)
+      : 1;
+    const trail = Number.isFinite(Number(ctc.wake_word_trail_tolerance))
+      ? Number(ctc.wake_word_trail_tolerance)
+      : -1;
+    const minConf = Number.isFinite(Number(ctc.min_matched_confidence))
+      ? Number(ctc.min_matched_confidence).toFixed(2)
+      : 'off';
+    const baseHits = Number.isFinite(Number(runtime.required_hits)) && Number(runtime.required_hits) > 0
+      ? Math.max(1, Math.floor(Number(runtime.required_hits)))
+      : null;
+    const targetHits = this._targetRequiredHits(runtime);
+    const targetHitsText = targetHits.length
+      ? ` target_hits=[${targetHits.map((v) => (Number.isFinite(v) ? String(v) : '-')).join(',')}]`
+      : '';
+    const bypass = Number.isFinite(Number(runtime.high_confidence_bypass))
+      ? ` bypass=${Number(runtime.high_confidence_bypass).toFixed(2)}`
+      : '';
+    const bypassHits = Number.isFinite(Number(runtime.high_confidence_bypass_min_hits))
+      ? ` bypass_hits=${Math.max(1, Math.floor(Number(runtime.high_confidence_bypass_min_hits)))}`
+      : '';
+    this._emitLog(
+      'info',
+      `VWW CTC manifest "${modelName}": targets=${targetCount} ed<=${maxEd} `
+      + `trail=${trail} min_conf=${minConf}`
+      + `${baseHits ? ` hits=${baseHits}` : ''}${targetHitsText}${bypass}${bypassHits}`,
+    );
+
+    const anchors = Array.isArray(ctc.wake_word_target_anchors)
+      ? ctc.wake_word_target_anchors
+      : [];
+    for (let i = 0; i < targetCount; i++) {
+      const hits = Number.isFinite(targetHits[i])
+        ? targetHits[i]
+        : baseHits;
+      const anchorList = Array.isArray(anchors[i]) && anchors[i].length
+        ? ` anchors=${anchors[i].join(',')}`
+        : '';
+      this._emitLog(
+        'info',
+        `CTC target [${i + 1}]${hits ? ` hits=${hits}` : ''}${anchorList}: `
+        + this._formatCtcTarget(ctc, i),
+      );
+    }
+  }
+
+  _targetRequiredHits(runtime) {
+    const raw = runtime?.target_required_hits;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? Math.max(1, Math.floor(n)) : null;
+    });
+  }
+
+  _formatCtcTarget(ctc, index) {
+    const phonemeTargets = Array.isArray(ctc.wake_word_target_phonemes)
+      ? ctc.wake_word_target_phonemes
+      : [];
+    if (Array.isArray(phonemeTargets[index])) {
+      return phonemeTargets[index].map((p) => (p === ' ' ? '_' : String(p))).join(' ');
+    }
+    const ids = Array.isArray(ctc.wake_word_targets?.[index])
+      ? ctc.wake_word_targets[index]
+      : [];
+    const inventory = Array.isArray(ctc.inventory) ? ctc.inventory : [];
+    const wordSepId = ctc.word_sep_id ?? 2;
+    return ids.map((id) => {
+      if (id === wordSepId) return '_';
+      return inventory[id] ?? `?${id}`;
+    }).join(' ');
+  }
+
+  _formatCtcTargetInfo(ctcInfo) {
+    const idx = Number.isInteger(ctcInfo?.matchedTargetIndex)
+      ? ctcInfo.matchedTargetIndex
+      : -1;
+    return idx >= 0 ? ` target=${idx + 1}` : '';
+  }
+
   _formatVwwRuntimeInfo(result, model, triggerType = null) {
     const info = result?.runtime?.[model];
     if (!info || info.mode !== 'counter') return '';
@@ -936,6 +1032,9 @@ export class WakeWordTestSession {
     if (triggerType) parts.push(`runtime_type=${triggerType}`);
     if (Number.isFinite(info.hits) && Number.isFinite(info.requiredHits)) {
       parts.push(`runtime_hits=${info.hits}/${info.requiredHits}`);
+    }
+    if (Number.isInteger(info.matchedTargetIndex) && info.matchedTargetIndex >= 0) {
+      parts.push(`runtime_target=${info.matchedTargetIndex + 1}`);
     }
     if (typeof info.highConfidenceBypass === 'number' && Number.isFinite(info.highConfidenceBypass)) {
       parts.push(`runtime_bypass=${info.highConfidenceBypass.toFixed(2)}`);

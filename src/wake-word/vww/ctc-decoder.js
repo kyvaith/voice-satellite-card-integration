@@ -176,31 +176,32 @@ export class CtcDecoder {
    * [o ʊ k e ɪ ː n ɑ ː b u ː] (length marker where WORD_SEP belongs)
    * matched canonical [o ʊ k e ɪ _ n ɑ ː b u ː] at ed=1 and fired.
    */
-  matches(decoded, confidence) {
-    if (!decoded.length) return false;
+  acceptedMatch(decoded, confidence) {
+    const miss = { matched: false, targetIndex: -1, editDistance: Infinity, confidence: 0 };
+    if (!decoded.length) return miss;
     const trailTol = this.trailTolerance;
     const hay = Uint8Array.from(decoded);
-    const gateActive = (
+    const hasConfidence = (
       confidence != null
-      && Number.isFinite(this.minMatchedConfidence)
       && confidence.length === decoded.length
+    );
+    const gateActive = (
+      hasConfidence
+      && Number.isFinite(this.minMatchedConfidence)
     );
     const minConf = this.minMatchedConfidence;
     // Helper: mean confidence over window [start, start+len)
-    const confOk = (start, len) => {
-      if (!gateActive) return true;
+    const meanConf = (start, len) => {
+      if (!hasConfidence) return 0;
       let sum = 0;
       for (let k = 0; k < len; k++) sum += confidence[start + k];
-      return (sum / len) >= minConf;
+      return sum / len;
     };
+    const confOk = (start, len) => !gateActive || meanConf(start, len) >= minConf;
     // Exact-substring fast path.  When trailTol or confidence gate is
     // active, we need to know the match location, so loop occurrences.
     for (let ti = 0; ti < this.targetBytes.length; ti++) {
       const t = this.targetBytes[ti];
-      if (trailTol < 0 && !gateActive) {
-        if (containsExact(hay, t)) return true;
-        continue;
-      }
       let idx = 0;
       while (idx + t.length <= hay.length) {
         let match = true;
@@ -210,14 +211,19 @@ export class CtcDecoder {
         if (match) {
           const trailing = hay.length - (idx + t.length);
           if ((trailTol < 0 || trailing <= trailTol) && confOk(idx, t.length)) {
-            return true;
+            return {
+              matched: true,
+              targetIndex: ti,
+              editDistance: 0,
+              confidence: meanConf(idx, t.length),
+            };
           }
         }
         idx++;
       }
     }
     const max = this.maxEditDistance | 0;
-    if (max <= 0) return false;
+    if (max <= 0) return miss;
     const ws = this.wordSepId;
     for (let ti = 0; ti < this.targets.length; ti++) {
       const target = this.targets[ti];
@@ -246,12 +252,21 @@ export class CtcDecoder {
             ? editDistanceAnchored(decoded, i, winLen, target, anchors, ws)
             : editDistance(decoded, i, winLen, target, ws);
           if (ed <= max && confOk(i, winLen)) {
-            return true;
+            return {
+              matched: true,
+              targetIndex: ti,
+              editDistance: ed,
+              confidence: meanConf(i, winLen),
+            };
           }
         }
       }
     }
-    return false;
+    return miss;
+  }
+
+  matches(decoded, confidence) {
+    return this.acceptedMatch(decoded, confidence).matched;
   }
 
   /**
@@ -300,6 +315,7 @@ export class CtcDecoder {
       matchedConfidence: 0,
       totalConfidence: 0,
       gateThreshold: this.minMatchedConfidence,
+      matchedTargetIndex: -1,
     };
     if (ids.length === 0) {
       return out;
@@ -355,7 +371,13 @@ export class CtcDecoder {
       out.matchedConfidence = sum / bestLen;
     }
     // Final matcher decision (applies confidence gate if configured)
-    out.matched = this.matches(ids, confidence);
+    const accepted = this.acceptedMatch(ids, confidence);
+    out.matched = accepted.matched;
+    out.matchedTargetIndex = accepted.targetIndex;
+    if (accepted.matched) {
+      out.minEditDistance = accepted.editDistance;
+      out.matchedConfidence = accepted.confidence;
+    }
     return out;
   }
 
