@@ -188,10 +188,11 @@ class VoiceSatellitePanel extends HTMLElement {
     }
     // v6.10.x shipped wake-word DSP defaulting to off - fix persisted
     // false values back to true (matching Voice PE hardware behavior).
+    // Auto gain control is intentionally left off (its own default), so
+    // the migration must not force it on.
     if (!(this._config._dsp_version >= 2)) {
       this._config.wake_word_noise_suppression = true;
       this._config.wake_word_echo_cancellation = true;
-      this._config.wake_word_auto_gain_control = true;
       this._config._dsp_version = 2;
       setStoredConfig(this._config);
     }

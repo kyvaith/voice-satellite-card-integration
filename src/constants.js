@@ -83,7 +83,7 @@ export const DEFAULT_CONFIG = {
   // hardware before audio reaches the wake-word model.
   wake_word_noise_suppression: true,
   wake_word_echo_cancellation: true,
-  wake_word_auto_gain_control: true,
+  wake_word_auto_gain_control: false,
   wake_word_voice_isolation: false,
 
   // Microphone Processing — Speech to Text streaming.
