@@ -123,12 +123,11 @@ export const DEFAULT_CONFIG = {
   // Screensaver
   screensaver_enabled: false,
   screensaver_timer_s: 60,
-  screensaver_type: 'black', // 'black' | 'media' | 'website' | 'webrtc'
+  screensaver_type: 'black', // 'black' | 'media' | 'website'
   screensaver_media_id: '',
   screensaver_media_interval_s: 10,
   screensaver_media_shuffle: false,
   screensaver_website_url: '',
-  screensaver_webrtc_url: '',
   screensaver_suppress_external: '',
 
   // Kiosk browser integration — only effective inside Fully Kiosk

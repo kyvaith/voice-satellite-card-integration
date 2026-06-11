@@ -86,8 +86,7 @@ set_screensaver:
         solid dark overlay (combine with a low brightness percentage in
         the panel for the strongest thermal savings). "media" uses the
         image/video/folder selected in the panel. "website" embeds the
-        URL configured in the panel. "webrtc" plays the go2rtc WebRTC
-        camera stream configured in the panel.
+        URL configured in the panel.
       required: true
       example: black
       selector:
@@ -96,7 +95,6 @@ set_screensaver:
             - black
             - media
             - website
-            - webrtc
 
 start_timer:
   name: Start timer

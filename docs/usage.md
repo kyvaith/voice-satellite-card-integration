@@ -230,7 +230,7 @@ When fired, the new type is pushed to every browser subscribed to that satellite
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | `string` | (required) | One of `black`, `media`, `website`, or `webrtc`. `black` is a solid dark overlay (combine with a low brightness percentage in the panel for the strongest thermal savings). `media` uses the image/video/folder selected in the panel. `website` embeds the URL configured in the panel. `webrtc` plays the go2rtc WebRTC camera stream configured in the panel. |
+| `type` | `string` | (required) | One of `black`, `media`, or `website`. `black` is a solid dark overlay (combine with a low brightness percentage in the panel for the strongest thermal savings). `media` uses the image/video/folder selected in the panel (cameras stream over WebRTC when available). `website` embeds the URL configured in the panel. |
 
 ### Examples
 
@@ -310,7 +310,8 @@ data:
 When a video file or camera stream is sent to the satellite, the browser renders a full-screen overlay over the entire UI:
 
 - **Local video files** (`.mp4`, `.webm`, etc.) play in a `<video>` element with the browser's native playback controls (play/pause/seek/volume)
-- **Cameras with the Stream integration** are delivered as HLS (`application/vnd.apple.mpegurl`). Playback uses [hls.js](https://github.com/video-dev/hls.js), which is lazy-loaded on first use, so audio-only setups don't pay the bundle cost. Safari falls through to native HLS automatically
+- **Cameras with a WebRTC provider** (any camera with a stream source on a modern HA install, courtesy of HA's built-in go2rtc) play over **WebRTC with sub-second latency**. The stream is negotiated over the satellite's authenticated websocket connection (`camera/webrtc/offer`), so no extra configuration, CORS setup, or exposed go2rtc URL is needed
+- **Cameras without WebRTC but with the Stream integration** fall back automatically to HLS (`application/vnd.apple.mpegurl`). Playback uses [hls.js](https://github.com/video-dev/hls.js), which is lazy-loaded on first use, so audio-only setups don't pay the bundle cost. Safari falls through to native HLS automatically
 - **Cameras without Stream support** (snapshot or MJPEG) are served via `/api/camera_proxy_stream/<entity>` and rendered in an `<img>` element. No native controls (browsers don't provide any for `multipart/x-mixed-replace`); use double-tap or the stop keyword to dismiss
 
 ```yaml
@@ -322,7 +323,7 @@ data:
   media_content_id: media-source://media_source/local/recipe.mp4
   media_content_type: video/mp4
 
-# Show a live camera feed
+# Show a live camera feed (WebRTC when available, HLS/MJPEG fallback)
 action: media_player.play_media
 target:
   entity_id: media_player.kitchen_tablet_media_player
@@ -330,6 +331,8 @@ data:
   media_content_id: media-source://camera/camera.front_door
   media_content_type: application/vnd.apple.mpegurl
 ```
+
+A bare camera entity id also works as `media_content_id` (e.g. `camera.front_door` with any `media_content_type`), which is convenient when templating automations.
 
 **Dismissal:**
 
@@ -341,9 +344,9 @@ data:
 
 While a video or camera stream is playing, saying the satellite's wake word hides the overlay and runs the voice flow as usual. When the flow finishes, the overlay reappears and playback resumes. For HLS streams the player automatically jumps to the live edge on resume, so you don't watch buffered footage from before the interruption.
 
-**HLS live latency:**
+**HLS live latency (fallback path only):**
 
-HLS is inherently buffered. With Home Assistant's default `stream` configuration, expect a **2 to 4 second** lag from real time. The integration tunes hls.js (`liveSyncDuration`, `liveMaxLatencyDuration`, `backBufferLength`, `maxLiveSyncPlaybackRate`) to stay close to the live edge and to catch up gracefully if the stream falls behind, but the floor is set server-side by HA's segment duration.
+Cameras playing over WebRTC have sub-second latency out of the box and none of this applies. For cameras that fall back to HLS: HLS is inherently buffered. With Home Assistant's default `stream` configuration, expect a **2 to 4 second** lag from real time. The integration tunes hls.js (`liveSyncDuration`, `liveMaxLatencyDuration`, `backBufferLength`, `maxLiveSyncPlaybackRate`) to stay close to the live edge and to catch up gracefully if the stream falls behind, but the floor is set server-side by HA's segment duration.
 
 For sub-second latency, enable Low-Latency HLS in your HA `configuration.yaml` and restart Home Assistant:
 

@@ -439,7 +439,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         schema=vol.Schema(
             {
                 vol.Required("entity_id"): cv.entity_ids,
-                vol.Required("type"): vol.In(["black", "media", "website", "webrtc"]),
+                vol.Required("type"): vol.In(["black", "media", "website"]),
             }
         ),
     )

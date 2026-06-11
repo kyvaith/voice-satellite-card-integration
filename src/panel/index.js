@@ -516,16 +516,14 @@ class VoiceSatellitePanel extends HTMLElement {
           ? ''
           : 'none';
     }
+
   }
 
   _renderScreensaverMediaCurrent() {
     const input = this.querySelector(`.${P}-ss-media-input`);
     if (!input) return;
     const id = this._config.screensaver_media_id || '';
-    // Don't overwrite what the user is currently typing.  ha-textfield
-    // hosts its real <input> in a shadow root, so :focus-within is the
-    // correct check (document.activeElement is always the host itself).
-    if (!input.matches(':focus-within')) input.value = id;
+    input.value = id;
   }
 
   async _openMediaPicker() {
@@ -738,7 +736,7 @@ class VoiceSatellitePanel extends HTMLElement {
           gap: 8px;
           margin: 24px 0;
         }
-        .${P}-ss-post-container { margin-top: 16px; }
+        .${P}-ss-post-container { margin-top: 24px; }
         .${P}-ss-post-container:empty { margin: 0; }
         .${P}-ss-website-hint {
           color: var(--secondary-text-color, #999);
@@ -818,6 +816,21 @@ class VoiceSatellitePanel extends HTMLElement {
         .${P}-ss-media-input {
           flex: 1;
           min-width: 0;
+          padding: 10px 12px;
+          font: inherit;
+          font-size: 13px;
+          color: var(--primary-text-color, #fff);
+          background: var(--secondary-background-color, #2c2c2e);
+          border: 1px solid var(--divider-color, #444);
+          border-radius: 6px;
+          box-sizing: border-box;
+          cursor: default;
+        }
+        .${P}-ss-media-input:focus {
+          outline: none;
+        }
+        .${P}-ss-media-input::placeholder {
+          color: var(--secondary-text-color, #777);
         }
         .${P}-ss-browse-btn {
           flex-shrink: 0;
@@ -1350,7 +1363,7 @@ class VoiceSatellitePanel extends HTMLElement {
         <div class="${P}-ss-media" style="display: none;">
           <div class="${P}-ss-media-label">Media source</div>
           <div class="${P}-ss-media-row">
-            <ha-textfield class="${P}-ss-media-input" placeholder="media-source://..."></ha-textfield>
+            <input type="text" class="${P}-ss-media-input" placeholder="media-source://..." readonly />
             <button type="button" class="${P}-ss-browse-btn">Browse</button>
           </div>
         </div>
@@ -2590,14 +2603,6 @@ class VoiceSatellitePanel extends HTMLElement {
     // Media Browse button (native HTML, no shadow DOM hack)
     const browseBtn = this.querySelector(`.${P}-ss-browse-btn`);
     if (browseBtn) browseBtn.addEventListener('click', () => this._openMediaPicker());
-
-    // Manual URI editing via the text input
-    const mediaInput = this.querySelector(`.${P}-ss-media-input`);
-    if (mediaInput) {
-      mediaInput.addEventListener('change', (e) => {
-        this._onSettingsChange({ screensaver_media_id: e.target.value.trim() });
-      });
-    }
 
     this._updateScreensaverMediaVisibility();
   }

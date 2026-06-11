@@ -5,6 +5,10 @@
  * satellite event subscription.  Plays audio in the browser, reports
  * state back via a WS command so the HA entity stays in sync.
  *
+ * Camera entities play over WebRTC (negotiated via camera/webrtc/offer
+ * on the HA websocket, sub-second latency) with automatic fallback to
+ * the resolved HLS / MJPEG URL for cameras without a WebRTC provider.
+ *
  * Also acts as the unified audio-state reporter: TTS, chimes, and
  * notification playback call notifyAudioStart/End so the HA
  * media_player entity reflects *all* audio output (matching Voice PE).
@@ -12,6 +16,7 @@
 
 import { buildMediaUrl, playMediaUrl } from '../audio/media-playback.js';
 import { attachDoubleTap } from '../shared/double-tap.js';
+import { cameraSupportsWebrtc, attachCameraWebrtc } from '../shared/camera-webrtc.js';
 import { Timing } from '../constants.js';
 import * as kiosk from '../kiosk/index.js';
 
@@ -72,6 +77,10 @@ export class MediaPlayerManager {
     // Keeps the in-app screensaver from re-activating mid-playback.
     // Started when a video/image overlay is shown, stopped on cleanup.
     this._screensaverKeepaliveTimer = null;
+
+    // WebRTC camera playback state
+    this._webrtcHandle = null;
+    this._cameraFallbackTried = false;
   }
 
   get isPlaying() { return this._playing; }
@@ -308,6 +317,12 @@ export class MediaPlayerManager {
     this._mediaId = media_id;
 
     const mt = typeof media_type === 'string' ? media_type.toLowerCase() : '';
+    // Camera entities arrive unresolved (media_id = camera.xxx) so we can
+    // negotiate WebRTC over the authenticated HA websocket. Falls back to
+    // the resolved HLS / MJPEG URL inside _attachWebrtc when the camera
+    // has no WebRTC provider.
+    const isCamera = mt === 'camera'
+      && typeof media_id === 'string' && media_id.startsWith('camera.');
     const isHls = mt === 'application/vnd.apple.mpegurl'
       || mt === 'application/x-mpegurl'
       || (typeof media_id === 'string' && media_id.toLowerCase().split('?')[0].endsWith('.m3u8'));
@@ -318,7 +333,7 @@ export class MediaPlayerManager {
     const isVideo = mt.startsWith('video/') || mt === 'video' || isHls;
     this._log.log(
       'media-player',
-      `Detection: isVideo=${isVideo} isHls=${isHls} isImage=${isImage} (mime="${mt}")`,
+      `Detection: isCamera=${isCamera} isVideo=${isVideo} isHls=${isHls} isImage=${isImage} (mime="${mt}")`,
     );
 
     // Sign relative URLs - HA media endpoints require authentication.
@@ -326,7 +341,10 @@ export class MediaPlayerManager {
     // signed by `_async_stream_endpoint_url`, so signing them again would
     // either be redundant or rewrite the path. Use them directly.
     let url;
-    if (media_id.startsWith('http://') || media_id.startsWith('https://')) {
+    if (isCamera) {
+      url = null; // no URL - WebRTC negotiates over the WS connection
+      this._log.log('media-player', `URL path: camera entity (WebRTC). entity=${media_id}`);
+    } else if (media_id.startsWith('http://') || media_id.startsWith('https://')) {
       url = media_id;
       this._log.log('media-player', `URL path: absolute (no signing). url=${url}`);
     } else if (isHls) {
@@ -390,15 +408,21 @@ export class MediaPlayerManager {
     // HLS camera streams buffer ahead, so resume after a wake-word
     // interrupt should jump to the live edge - otherwise the user watches
     // tens of seconds of stale footage. MJPEG doesn't buffer (each
-    // reconnect shows the live frame) so it doesn't need this.
+    // reconnect shows the live frame) and WebRTC resumes at the live edge
+    // by nature, so neither needs this.
     this._isLive = isHls;
 
-    const dispatch = isImage ? 'image overlay' : (isVideo ? 'video overlay' : 'audio element');
+    const dispatch = isCamera
+      ? 'webrtc camera overlay'
+      : (isImage ? 'image overlay' : (isVideo ? 'video overlay' : 'audio element'));
     this._log.log(
       'media-player',
       `Dispatch: ${dispatch} (effectiveVolume=${this._effectiveVolume().toFixed(3)})`,
     );
-    if (isImage) {
+    if (isCamera) {
+      this._cameraFallbackTried = false;
+      this._audio = this._playVideo(null, this._effectiveVolume(), callbacks, { webrtcEntity: media_id });
+    } else if (isImage) {
       this._audio = this._playImage(url, callbacks);
     } else if (isVideo) {
       this._audio = this._playVideo(url, this._effectiveVolume(), callbacks, { isHls });
@@ -409,7 +433,7 @@ export class MediaPlayerManager {
     // Visual overlays must dismiss the screensaver and prevent it from
     // re-activating mid-playback - audio-only playback doesn't need this
     // since it doesn't put anything on screen.
-    if (isVideo || isImage) {
+    if (isCamera || isVideo || isImage) {
       this._card.screensaver?.dismiss();
       this._startScreensaverKeepalive();
     }
@@ -466,8 +490,12 @@ export class MediaPlayerManager {
    * For HLS streams, hls.js is dynamically imported and attached so
    * Chromium-based browsers (which lack native HLS) can play camera
    * feeds. Safari/iOS use native HLS via direct src.
+   *
+   * For camera entities (webrtcEntity set), the stream is negotiated
+   * over the HA websocket via camera/webrtc/offer and attached as a
+   * MediaStream - url is unused.
    */
-  _playVideo(url, volume, { onEnd, onError, onStart }, { isHls = false } = {}) {
+  _playVideo(url, volume, { onEnd, onError, onStart }, { isHls = false, webrtcEntity = null } = {}) {
     const overlay = document.createElement('div');
     overlay.className = 'vs-video-overlay';
     overlay.style.cssText = [
@@ -504,7 +532,10 @@ export class MediaPlayerManager {
       `Video overlay created. claims_native_hls=${!!video.canPlayType('application/vnd.apple.mpegurl')}`,
     );
 
-    if (isHls) {
+    if (webrtcEntity) {
+      this._log.log('media-player', `Routing camera via WebRTC. entity=${webrtcEntity}`);
+      this._attachWebrtc(video, webrtcEntity, onStart, onError);
+    } else if (isHls) {
       // Prefer hls.js for HLS — Chromium browsers (including Fully Kiosk
       // on Android) often claim native HLS support via canPlayType but
       // fail at runtime with NotSupportedError. hls.js handles this
@@ -706,8 +737,109 @@ export class MediaPlayerManager {
     }
   }
 
+  /**
+   * Negotiate a WebRTC stream for a camera entity over the HA websocket
+   * (shared client in src/shared/camera-webrtc.js) and attach it to the
+   * <video>.  Cameras without a WebRTC provider (or failed negotiations
+   * before first frame) fall back to the classic resolved HLS / MJPEG
+   * URL via _fallbackCameraStream.
+   */
+  async _attachWebrtc(video, entityId, onStart, onError) {
+    const conn = this._card.connection;
+    if (!conn) {
+      onError(new Error('No HA connection for WebRTC'));
+      return;
+    }
+
+    // Fired for both negotiation errors and error events from HA. Falls
+    // back to HLS/MJPEG once if the stream never started; reports a real
+    // playback error otherwise.
+    let started = false;
+    const fail = (err) => {
+      if (this._audio !== video) return; // superseded by a newer _play
+      if (!started && !this._cameraFallbackTried) {
+        this._cameraFallbackTried = true;
+        this._log.log(
+          'media-player',
+          `WebRTC failed (${err?.message || err}) - falling back to HLS/MJPEG`,
+        );
+        this._fallbackCameraStream(entityId);
+      } else {
+        onError(err);
+      }
+    };
+
+    // Capability check - cameras without a WebRTC provider go straight
+    // to the classic resolved-URL path.
+    try {
+      const supported = await cameraSupportsWebrtc(conn, entityId);
+      if (this._audio !== video) return;
+      if (!supported) {
+        this._log.log('media-player', `Camera ${entityId} has no WebRTC support`);
+        fail(new Error('WebRTC not supported by camera'));
+        return;
+      }
+    } catch (e) {
+      fail(e);
+      return;
+    }
+
+    video.addEventListener('loadeddata', () => {
+      if (this._audio !== video) return;
+      video.play().then(() => {
+        started = true;
+        this._log.log('media-player', `WebRTC stream playing. entity=${entityId}`);
+        onStart?.();
+      }).catch((e) => fail(e));
+    }, { once: true });
+
+    this._webrtcHandle = attachCameraWebrtc({
+      conn,
+      entityId,
+      video,
+      log: (m) => this._log.log('media-player', m),
+      onError: fail,
+    });
+  }
+
+  /**
+   * Classic camera playback path: resolve the camera media source to its
+   * HLS or MJPEG URL (same thing the integration used to push before the
+   * WebRTC path existed) and re-dispatch through _play.
+   */
+  async _fallbackCameraStream(entityId) {
+    const conn = this._card.connection;
+    if (!conn) return;
+    try {
+      const res = await conn.sendMessagePromise({
+        type: 'media_source/resolve_media',
+        media_content_id: `media-source://camera/${entityId}`,
+      });
+      this._log.log(
+        'media-player',
+        `Camera fallback resolved: url=${res?.url} mime=${res?.mime_type}`,
+      );
+      this._play({ media_id: res.url, media_type: res.mime_type });
+    } catch (e) {
+      this._log.error('media-player', `Camera fallback resolve failed: ${e?.message || JSON.stringify(e)}`);
+      this._cleanup();
+      if (this._activeSources.size === 0) {
+        this._reportState('idle');
+      }
+    }
+  }
+
+  _destroyWebrtc() {
+    if (this._webrtcHandle) {
+      this._log.log('media-player', 'Closing WebRTC session');
+      this._webrtcHandle.close();
+      this._webrtcHandle = null;
+    }
+  }
+
   _removeVideoOverlay() {
     this._destroyHls();
+    this._destroyWebrtc();
     this._stopScreensaverKeepalive();
     if (this._videoOverlay) {
       this._videoOverlay.remove();
@@ -809,12 +941,15 @@ export class MediaPlayerManager {
     }
     // Tear down hls.js BEFORE clearing the video element's src - hls owns
     // the MSE buffers and calling destroy() detaches them cleanly. Doing
-    // it the other way around can throw or leak buffers.
+    // it the other way around can throw or leak buffers. Same ordering
+    // for the WebRTC peer connection, which owns the MediaStream.
     this._destroyHls();
+    this._destroyWebrtc();
     if (this._audio) {
       this._audio.onended = null;
       this._audio.onerror = null;
       this._audio.pause();
+      if (this._audio.srcObject) this._audio.srcObject = null;
       this._audio.src = '';
       this._audio = null;
     }

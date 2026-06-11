@@ -2,15 +2,14 @@
  * ScreensaverManager
  *
  * Built-in screensaver that overlays the display after an idle timeout.
- * Supports four display types:
+ * Supports three display types:
  *   - 'black'   — solid black overlay (original behavior, dims FK backlight)
  *   - 'media'   — images/videos/cameras from a media-source URI (single
  *                 file, folder for cycling, or a camera feed from HA's
- *                 media library)
+ *                 media library; cameras stream over WebRTC when the
+ *                 entity has a provider, MJPEG otherwise)
  *   - 'website' — arbitrary URL in an <iframe>, useful for kiosk-style
  *                 apps like immich-kiosk
- *   - 'webrtc'  — low-latency camera stream from a go2rtc WebRTC/WHEP
- *                 endpoint, played natively in a <video> element
  *
  * Also runs an external-screensaver keep-alive loop: while a voice
  * interaction is active, periodically turns off a user-selected switch
@@ -21,30 +20,45 @@
  *   - screensaver_enabled, screensaver_timer_s
  *   - screensaver_type
  *   - screensaver_media_id, screensaver_media_interval_s, screensaver_media_shuffle
- *   - screensaver_website_url, screensaver_webrtc_url
+ *   - screensaver_website_url
  *   - screensaver_suppress_external
  */
 
 import { INTERACTING_STATES, State } from '../constants.js';
+import { cameraSupportsWebrtc, attachCameraWebrtc } from '../shared/camera-webrtc.js';
 import * as kiosk from '../kiosk/index.js';
 
 const OVERLAY_ID = 'voice-satellite-screensaver';
 const FADE_MS = 200;
 const MEDIA_FADE_MS = 600;
 const KEEPALIVE_INTERVAL_MS = 5000;
-const WEBRTC_RETRY_MS = 5000;
 
 /**
  * Detect a camera entity selected via the media browser.
  * HA uses `media-source://camera/camera.xxx` for cameras; extract the
- * `camera.xxx` entity_id so we can stream via camera_proxy_stream
- * (MJPEG) rather than the HLS URL that resolve_media tends to return.
+ * `camera.xxx` entity_id so we can stream via WebRTC (sub-second
+ * latency, negotiated over the HA websocket) or, when the camera has
+ * no WebRTC provider, via camera_proxy_stream (MJPEG) - rather than
+ * the HLS URL that resolve_media tends to return, which Chrome and
+ * Firefox can't play in <video>.
  */
 function getCameraEntityFromMediaId(id) {
   if (!id) return null;
   const m = /^media-source:\/\/camera\/(camera\.[a-z0-9_]+)/i.exec(id);
   return m ? m[1] : null;
 }
+
+/** Shared styles for media elements (image/video/camera) in the overlay. */
+const MEDIA_BASE_STYLES = [
+  'position:absolute',
+  'inset:0',
+  'width:100%',
+  'height:100%',
+  'object-fit:contain',
+  'background:#000',
+  'opacity:0',
+  `transition:opacity ${MEDIA_FADE_MS}ms ease`,
+].join(';');
 
 export class ScreensaverManager {
   constructor(session) {
@@ -64,7 +78,6 @@ export class ScreensaverManager {
     this._mediaIntervalSeconds = 10;
     this._mediaShuffle = false;
     this._websiteUrl = '';
-    this._webrtcUrl = '';
     this._suppressExternal = '';
     this._activityHandler = null;
     this._savedBrightness = null;
@@ -76,10 +89,11 @@ export class ScreensaverManager {
     this._playlistIdx = 0;
     this._mediaCycleTimer = null;
 
-    // WebRTC playback state
-    this._webrtcPc = null;
-    this._webrtcRetryTimer = null;
-    this._webrtcGen = 0;
+    // WebRTC camera state (media type with a camera selected). Cameras
+    // whose WebRTC negotiation failed fall back to MJPEG and are
+    // remembered so we don't retry every cycle.
+    this._cameraWebrtc = null;
+    this._webrtcFailedCams = new Set();
 
     // External screensaver keep-alive
     this._keepaliveTimer = null;
@@ -108,13 +122,12 @@ export class ScreensaverManager {
       }
     }
     const newFkMotionDismiss = cfg.screensaver_fk_motion_dismiss === true;
-    const newType = ['black', 'media', 'website', 'webrtc'].includes(cfg.screensaver_type)
+    const newType = ['black', 'media', 'website'].includes(cfg.screensaver_type)
       ? cfg.screensaver_type : 'black';
     const newMediaId = cfg.screensaver_media_id || '';
     const newMediaInterval = Math.max(2, parseInt(cfg.screensaver_media_interval_s, 10) || 10);
     const newMediaShuffle = cfg.screensaver_media_shuffle === true;
     const newWebsiteUrl = (cfg.screensaver_website_url || '').trim();
-    const newWebrtcUrl = (cfg.screensaver_webrtc_url || '').trim();
     const newSuppressExternal = cfg.screensaver_suppress_external || '';
 
     const settingsChanged =
@@ -126,8 +139,7 @@ export class ScreensaverManager {
       newMediaId !== this._mediaId ||
       newMediaInterval !== this._mediaIntervalSeconds ||
       newMediaShuffle !== this._mediaShuffle ||
-      newWebsiteUrl !== this._websiteUrl ||
-      newWebrtcUrl !== this._webrtcUrl;
+      newWebsiteUrl !== this._websiteUrl;
 
     this._suppressExternal = newSuppressExternal;
 
@@ -144,7 +156,6 @@ export class ScreensaverManager {
     this._mediaIntervalSeconds = newMediaInterval;
     this._mediaShuffle = newMediaShuffle;
     this._websiteUrl = newWebsiteUrl;
-    this._webrtcUrl = newWebrtcUrl;
 
     this._log.log('screensaver', `Settings: enabled=${newEnabled}, timer=${newTimer}s, type=${newType}`);
 
@@ -232,7 +243,7 @@ export class ScreensaverManager {
    */
   teardown() {
     this._dismiss();
-    this._stopWebrtc();
+    this._stopCameraWebrtc();
     this._clearIdleTimer();
     this._removeActivityListeners();
     this._removeUnloadHandler();
@@ -306,8 +317,6 @@ export class ScreensaverManager {
       this._renderMedia();
     } else if (this._type === 'website') {
       this._renderWebsite();
-    } else if (this._type === 'webrtc') {
-      this._renderWebrtc();
     }
 
     // Force reflow so the transition plays from opacity 0
@@ -324,11 +333,9 @@ export class ScreensaverManager {
     // Restore hardware backlight to whatever it was before we dimmed it
     this._restoreScreen();
 
-    // Stop media cycling
+    // Stop media cycling and any WebRTC camera stream
     this._stopMediaCycle();
-
-    // Tear down any WebRTC peer connection
-    this._stopWebrtc();
+    this._stopCameraWebrtc();
 
     if (this._overlay) {
       this._overlay.classList.remove('vs-screensaver-visible');
@@ -384,125 +391,6 @@ export class ScreensaverManager {
     this._contentEl.appendChild(iframe);
   }
 
-  _renderWebrtc() {
-    this._overlay.style.backgroundColor = '#000000';
-    if (!this._contentEl) return;
-    this._contentEl.innerHTML = '';
-
-    if (!this._webrtcUrl) {
-      this._log.log('screensaver', 'WebRTC mode but no URL configured — falling back to black');
-      return;
-    }
-    this._startWebrtc();
-  }
-
-  /**
-   * Connect to a go2rtc WebRTC/WHEP endpoint and play the stream in a
-   * muted <video>.  go2rtc's /api/webrtc?src=... accepts a WHEP-style
-   * exchange: POST the SDP offer as application/sdp, the response body
-   * is the SDP answer.  Trickle ICE is not supported, so we wait for
-   * ICE gathering to finish before posting the offer.
-   */
-  async _startWebrtc() {
-    this._stopWebrtc(); // bumps _webrtcGen, invalidating in-flight setups
-    const gen = this._webrtcGen;
-
-    const video = document.createElement('video');
-    video.autoplay = true;
-    video.muted = true;
-    video.playsInline = true;
-    video.style.cssText = [
-      'position:absolute',
-      'inset:0',
-      'width:100%',
-      'height:100%',
-      'object-fit:contain',
-      'background:#000',
-      'opacity:0',
-      `transition:opacity ${MEDIA_FADE_MS}ms ease`,
-    ].join(';');
-    video.addEventListener('loadeddata', () => this._fadeInAndSweep(video), { once: true });
-
-    const pc = new RTCPeerConnection();
-    this._webrtcPc = pc;
-    pc.addTransceiver('video', { direction: 'recvonly' });
-    pc.addTransceiver('audio', { direction: 'recvonly' });
-    pc.ontrack = (ev) => {
-      if (!video.srcObject) video.srcObject = ev.streams[0];
-    };
-    pc.onconnectionstatechange = () => {
-      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        this._log.log('screensaver', `WebRTC connection ${pc.connectionState}`);
-        this._scheduleWebrtcRetry(gen);
-      }
-    };
-
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await this._waitForIceGathering(pc);
-      if (gen !== this._webrtcGen || !this._active) { pc.close(); return; }
-
-      const res = await fetch(this._webrtcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/sdp' },
-        body: pc.localDescription.sdp,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const answer = await res.text();
-      if (gen !== this._webrtcGen || !this._active) { pc.close(); return; }
-
-      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
-      if (this._contentEl) this._contentEl.appendChild(video);
-      this._log.log('screensaver', 'WebRTC stream negotiated');
-    } catch (e) {
-      this._log.log('screensaver', `WebRTC setup failed: ${e.message || e}`);
-      this._scheduleWebrtcRetry(gen);
-    }
-  }
-
-  /** Resolve once ICE gathering completes (or after a 2s cap — on a LAN
-   *  the host candidates go2rtc needs are gathered near-instantly). */
-  _waitForIceGathering(pc) {
-    if (pc.iceGatheringState === 'complete') return Promise.resolve();
-    return new Promise((resolve) => {
-      const done = () => {
-        pc.removeEventListener('icegatheringstatechange', check);
-        clearTimeout(cap);
-        resolve();
-      };
-      const check = () => {
-        if (pc.iceGatheringState === 'complete') done();
-      };
-      const cap = setTimeout(done, 2000);
-      pc.addEventListener('icegatheringstatechange', check);
-    });
-  }
-
-  _scheduleWebrtcRetry(gen) {
-    if (gen !== this._webrtcGen) return;
-    if (!this._active || this._type !== 'webrtc') return;
-    if (this._webrtcRetryTimer) return;
-    this._webrtcRetryTimer = setTimeout(() => {
-      this._webrtcRetryTimer = null;
-      if (!this._active || this._type !== 'webrtc') return;
-      this._log.log('screensaver', 'Retrying WebRTC stream');
-      this._startWebrtc();
-    }, WEBRTC_RETRY_MS);
-  }
-
-  _stopWebrtc() {
-    this._webrtcGen++;
-    if (this._webrtcRetryTimer) {
-      clearTimeout(this._webrtcRetryTimer);
-      this._webrtcRetryTimer = null;
-    }
-    if (this._webrtcPc) {
-      try { this._webrtcPc.close(); } catch (_) { /* already closed */ }
-      this._webrtcPc = null;
-    }
-  }
-
   async _renderMedia() {
     this._overlay.style.backgroundColor = '#000000';
     if (!this._contentEl) return;
@@ -514,6 +402,7 @@ export class ScreensaverManager {
     }
 
     try {
+      this._webrtcFailedCams.clear();
       this._playlist = await this._resolvePlaylist(this._mediaId);
       if (this._playlist.length === 0) {
         this._log.log('screensaver', 'Playlist empty — falling back to black');
@@ -560,17 +449,23 @@ export class ScreensaverManager {
     const conn = this._session.connection;
     if (!conn) return;
 
+    // Close any WebRTC camera stream from the previous playlist item
+    // before rendering the next one (the old <video> keeps its last
+    // frame for the cross-fade).
+    this._stopCameraWebrtc();
+
     const itemId = this._playlist[this._playlistIdx];
     let url = '';
     let mime = '';
 
     // Camera entities selected via the media browser come back as
-    // media-source://camera/camera.xxx.  Resolving them tends to yield
-    // HLS playlists, which Chrome/Firefox can't play in <video>.
-    // Instead, use the MJPEG proxy stream which is universal and
-    // works inside <img>.
+    // media-source://camera/camera.xxx.  Try WebRTC first (sub-second
+    // latency via HA signaling); cameras without a WebRTC provider (or
+    // with a failed negotiation) use the MJPEG proxy stream, which is
+    // universal and works inside <img>.
     const cameraEid = getCameraEntityFromMediaId(itemId);
     if (cameraEid) {
+      if (await this._tryCameraWebrtc(cameraEid)) return;
       try {
         const res = await conn.sendMessagePromise({
           type: 'auth/sign_path',
@@ -613,16 +508,7 @@ export class ScreensaverManager {
     }
 
     const isVideo = /^video\//.test(mime) || /\.(mp4|webm|ogg|mov)($|\?)/i.test(url);
-    const baseStyles = [
-      'position:absolute',
-      'inset:0',
-      'width:100%',
-      'height:100%',
-      'object-fit:contain',
-      'background:#000',
-      'opacity:0',
-      `transition:opacity ${MEDIA_FADE_MS}ms ease`,
-    ].join(';');
+    const baseStyles = MEDIA_BASE_STYLES;
 
     if (isVideo) {
       const v = document.createElement('video');
@@ -656,6 +542,73 @@ export class ScreensaverManager {
       if (this._playlist.length > 1) {
         this._scheduleNextMediaCycle();
       }
+    }
+  }
+
+  /**
+   * Play a camera playlist item over WebRTC (HA signaling, shared
+   * client in src/shared/camera-webrtc.js).  Returns true when the
+   * WebRTC path is handling the item; false to fall through to the
+   * MJPEG proxy path.  A camera whose negotiation fails mid-stream is
+   * remembered in _webrtcFailedCams and re-rendered via MJPEG.
+   */
+  async _tryCameraWebrtc(cameraEid) {
+    const conn = this._session.connection;
+    if (!conn || this._webrtcFailedCams.has(cameraEid)) return false;
+
+    let supported = false;
+    try {
+      supported = await cameraSupportsWebrtc(conn, cameraEid);
+    } catch (e) {
+      this._log.log('screensaver', `Camera capability check failed: ${e?.message || e}`);
+      return false;
+    }
+    if (!supported) {
+      this._log.log('screensaver', `Camera ${cameraEid} has no WebRTC support - using MJPEG`);
+      return false;
+    }
+    // Dismissed while awaiting the capability check - claim the item as
+    // handled so the caller doesn't render a stale MJPEG stream.
+    if (!this._active || !this._contentEl) return true;
+
+    this._log.log('screensaver', `Camera ${cameraEid} via WebRTC`);
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.style.cssText = MEDIA_BASE_STYLES;
+    video.addEventListener('loadeddata', () => this._fadeInAndSweep(video), { once: true });
+
+    const idx = this._playlistIdx;
+    this._cameraWebrtc = attachCameraWebrtc({
+      conn,
+      entityId: cameraEid,
+      video,
+      log: (m) => this._log.log('screensaver', m),
+      onError: (e) => {
+        this._log.log(
+          'screensaver',
+          `Camera WebRTC failed for ${cameraEid}: ${e?.message || e} - falling back to MJPEG`,
+        );
+        this._stopCameraWebrtc();
+        this._webrtcFailedCams.add(cameraEid);
+        // Re-render the same item through the MJPEG path if it's still
+        // the one on screen.
+        if (this._active && this._playlistIdx === idx) this._playCurrentItem();
+      },
+    });
+    this._contentEl.appendChild(video);
+
+    if (this._playlist.length > 1) {
+      this._scheduleNextMediaCycle();
+    }
+    return true;
+  }
+
+  _stopCameraWebrtc() {
+    if (this._cameraWebrtc) {
+      this._cameraWebrtc.close();
+      this._cameraWebrtc = null;
     }
   }
 
