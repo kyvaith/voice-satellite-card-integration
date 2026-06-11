@@ -769,6 +769,21 @@ export class MediaPlayerManager {
       }
     };
 
+    // Show an instant snapshot while waiting for the first decodable
+    // keyframe. WebRTC relays the camera stream without transcoding, so
+    // a new viewer can't render until the camera's next IDR frame -
+    // UniFi Protect emits one every ~4s, leaving a black screen without
+    // this. The poster clears automatically when the stream renders.
+    conn.sendMessagePromise({
+      type: 'auth/sign_path',
+      path: `/api/camera_proxy/${entityId}`,
+      expires: Timing.AUTH_SIGN_EXPIRES,
+    }).then((res) => {
+      if (this._audio === video && res?.path && !video.srcObject) {
+        video.poster = buildMediaUrl(res.path);
+      }
+    }).catch(() => { /* no snapshot - black screen until first frame */ });
+
     // Capability check - cameras without a WebRTC provider go straight
     // to the classic resolved-URL path.
     try {
