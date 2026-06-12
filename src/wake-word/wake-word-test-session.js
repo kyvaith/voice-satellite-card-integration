@@ -186,7 +186,6 @@ export class WakeWordTestSession {
     // a faithful preview of what the user will experience at runtime.
     this._energyGateEnabled = opts.energyGateEnabled === true;
     this._sensitivityLabel = opts.sensitivityLabel || 'Moderately sensitive';
-    this._vwwGpuCompatibilityMode = this._engine === 'vww' && opts.vwwGpuCompatibilityMode === true;
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
@@ -425,10 +424,6 @@ export class WakeWordTestSession {
     // For VWW with no explicit threshold, omit cutoffs so the worker
     // pulls each model's recommended_threshold from its JSON manifest.
     if (this._engine === 'vww') {
-      this._emitLog(
-        'info',
-        `VWW GPU shader mode: ${this._vwwGpuCompatibilityMode ? 'compatibility Conv shaders' : 'standard high-performance shaders'}`,
-      );
       try {
         const params = await loadVwwModelParams(this._modelName);
         this._reportVwwModelParams(this._modelName, params);
@@ -443,7 +438,6 @@ export class WakeWordTestSession {
       energyGateEnabled: this._energyGateEnabled,
       sensitivityLabel: this._sensitivityLabel,
       enableTimings: true,
-      vwwGpuCompatibilityMode: this._vwwGpuCompatibilityMode,
       log: this._instanceLog,
     });
   }
@@ -484,7 +478,9 @@ export class WakeWordTestSession {
     while (this._sampleBufLen >= CHUNK_SIZE) {
       const chunk = new Float32Array(CHUNK_SIZE);
       chunk.set(this._sampleBuf.subarray(0, CHUNK_SIZE));
-      this._frameQueue.push(chunk);
+      // Capture timestamp for the stale-chunk fast-ingest path (see
+      // WorkerProxyBackend.processChunk).
+      this._frameQueue.push({ buf: chunk, t: Date.now() });
       this._sampleBuf.copyWithin(0, CHUNK_SIZE, this._sampleBufLen);
       this._sampleBufLen -= CHUNK_SIZE;
     }
@@ -502,7 +498,7 @@ export class WakeWordTestSession {
           const chunkIndex = this._processedChunkCount++;
           const audioEndMs = (chunkIndex + 1) * CHUNK_DURATION_MS;
           const t0 = performance.now();
-          const result = await this._inference.processChunk(frame);
+          const result = await this._inference.processChunk(frame.buf, frame.t);
           const dt = performance.now() - t0;
           this._recordPerfSample(dt, result?.timings || null);
           this._recordRmsSample(result?.rms);

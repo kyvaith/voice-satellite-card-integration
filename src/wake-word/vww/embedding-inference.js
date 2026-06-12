@@ -53,11 +53,10 @@ export class VwwEmbeddingInference {
    * @param {object} opts.sharedMelspec     - compiled OWW melspec ONNX
    * @param {object} opts.sharedEmbedding   - compiled OWW embedding ONNX
    */
-  constructor({ device, sharedMelspec, sharedEmbedding, gpuCompatibilityMode = false, log = null, pipelineLog = false }) {
+  constructor({ device, sharedMelspec, sharedEmbedding, log = null, pipelineLog = false }) {
     this._device = device;
     this._sharedMelspec = sharedMelspec;
     this._sharedEmbedding = sharedEmbedding;
-    this._gpuCompatibilityMode = gpuCompatibilityMode === true;
     this._log = log;
     this._pipelineLog = pipelineLog === true;
     this._melGpuRunner = null;
@@ -87,7 +86,6 @@ export class VwwEmbeddingInference {
 
   async _init() {
     const runnerOptions = {
-      gpuCompatibilityMode: this._gpuCompatibilityMode,
       log: this._log,
       pipelineLog: this._pipelineLog,
     };
@@ -110,7 +108,6 @@ export class VwwEmbeddingInference {
   async addKeyword(name, classifierCompiled, embeddingWindow = DEFAULT_EMBEDDING_WINDOW) {
     if (this._keywords.has(name)) return;
     const classifierRunner = await GpuModelRunner.create(this._device, classifierCompiled, {
-      gpuCompatibilityMode: this._gpuCompatibilityMode,
       log: this._log,
       pipelineLog: this._pipelineLog,
     });

@@ -47,6 +47,10 @@ All three engines run entirely in the browser in pure JavaScript and produce the
 ### Default and fallback
 microWakeWord is the default detection mode on fresh installs because it works on every device. If you select vsWakeWord or openWakeWord on a device without WebGPU, the satellite shows an error toast and asks you to switch back - the GPU requirement is enforced, not a soft fallback.
 
+On devices where Chrome blocks the standard (Vulkan-backed) WebGPU tier - notably Android 11 and older, where `requestAdapter()` always returns null - the engines automatically retry with a **compatibility-tier adapter** (`featureLevel: 'compatibility'`, backed by OpenGL ES). This unlocks real hardware acceleration on older tablets. Expect higher per-chunk inference times than on a Vulkan-backed device; when inference can't keep up with real time, vsWakeWord automatically skips the GPU run for backlogged chunks (audio still enters the detection window) so wake latency stays bounded instead of drifting.
+
+vsWakeWord's conv shaders are deliberately generic (shapes in uniform buffers, no per-layer specialization): heavily specialized kernels crash the fragile shader compilers found in Android WebView and GLES drivers, and on healthy devices the measured cost of the generic kernels is about 1 ms per chunk - far below the 80 ms budget.
+
 If your device supports WebGPU and your wake word is available as a vsWakeWord model, **vsWakeWord is the recommended choice** - particularly on wall-mounted tablets, which is what the models were trained for. Pick openWakeWord when you need a keyword that vsWakeWord doesn't ship yet, or when you specifically want OWW's behavior. Stick with microWakeWord if your device has no WebGPU.
 
 ## Performance comparison

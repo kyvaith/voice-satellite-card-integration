@@ -1,226 +1,44 @@
 /**
- * WGSL compute-shader generators for the openWakeWord embedding model.
+ * WGSL compute-shader generators for the vsWakeWord GPU runner.
  *
- * Per user direction we compile **once per layer with shape/stride/
- * padding constants baked into the shader source** rather than
- * threading them through a uniform buffer.  This gives the WGSL
- * compiler more room to unroll loops and do constant-folding, at the
- * cost of more shader-module objects (one per CONV_2D op = 20).
+ * Conv shaders keep shape/stride/padding in a uniform buffer (one
+ * generic module reused across layers) rather than baking them as
+ * compile-time constants.  We used to ship per-layer specialized
+ * "fast" conv shaders alongside these, but the heavily unrolled
+ * kernels they produce crash fragile shader compilers (Fully Kiosk /
+ * Android WebView, GLES-backed compatibility-tier adapters), and on
+ * healthy drivers the measured win over the vectorized generic kernel
+ * was ~1 ms per 80 ms chunk - so the generic kernels are the only conv
+ * path now.  Non-conv ops (pool, pad, element-wise) still bake their
+ * shapes: they're tiny single-loop kernels that no compiler chokes on.
  *
  * Layout convention (matches the CPU runner):
- *   - Tensors are NHWC float32, flattened.
- *   - CONV_2D weights are stored OHWI: outC × kH × kW × inC.
+ *   - TFLite tensors are NHWC float32, flattened; CONV_2D weights are
+ *     OHWI: outC × kH × kW × inC.  ONNX models are NCHW / OIHW.
  *
  * Workgroup sizing strategy:
  *   For ops with three independent output dims (CONV_2D, MAX_POOL_2D)
- *   we dispatch a 3D grid of (ow, oh, oc) and pick a workgroup that
- *   keeps each thread doing ~1 output element.  Element-wise ops use
- *   a flat 1D dispatch with smaller workgroups to reduce per-dispatch
- *   pressure on mobile/WebView GPU drivers.
+ *   we dispatch a 3D grid of (ow, oh, oc).  The NCHW conv additionally
+ *   computes four adjacent W outputs per invocation (vec4 accumulator,
+ *   see COMPAT_CONV_W_VECTOR).  Element-wise ops use a flat 1D dispatch
+ *   with smaller workgroups to reduce per-dispatch pressure on
+ *   mobile/WebView GPU drivers.
  */
 
 const ELEMENTWISE_WORKGROUP = 32;
 const CONV_WG_W = 4;
 const CONV_WG_H = 4;
 const CONV_WG_C = 1;
-const COMPAT_CONV_WG_W = 1;
-const COMPAT_CONV_WG_H = 1;
+// 8x8x1 = 64 invocations: fits the compatibility-tier cap (128) and the
+// shaders use no workgroup memory or barriers, so a larger workgroup
+// carries none of the fragile-driver risk the compat path guards
+// against - while 1x1x1 wasted an entire Mali warp per workgroup and
+// made dispatch overhead dominate (~2x real-time budget on Mali-G71).
+const COMPAT_CONV_WG_W = 8;
+const COMPAT_CONV_WG_H = 8;
 const COMPAT_CONV_WG_C = 1;
 const MATMUL_WG_W = 4;
 const MATMUL_WG_H = 4;
-
-/**
- * CONV_2D shader for one specific layer.  Bakes the layer's input
- * shape, output shape, kernel size, stride, dilation, and padding as
- * `const`s so the inner loops have known bounds at WGSL compile time.
- *
- * Supported activation: ACT_NONE only - the embedding model's conv
- * layers never have a fused activation (LEAKY_RELU comes as a
- * separate op).  If we encounter another model with fused activations
- * we add them here.
- *
- * @param {object} cfg
- * @param {[number,number,number,number]} cfg.inShape  - [batch, inH, inW, inC]
- * @param {[number,number,number,number]} cfg.outShape - [batch, outH, outW, outC]
- * @param {[number,number,number,number]} cfg.weightShape - [outC, kH, kW, filterC]
- * @param {number} cfg.strideH
- * @param {number} cfg.strideW
- * @param {number} cfg.dilationH
- * @param {number} cfg.dilationW
- * @param {number} cfg.padTop
- * @param {number} cfg.padLeft
- * @returns {string} WGSL source
- */
-export function conv2dShader(cfg) {
-  const [, inH, inW, inC] = cfg.inShape;
-  const [, outH, outW, outC] = cfg.outShape;
-  const [, kH, kW] = cfg.weightShape;
-  const sH = cfg.strideH;
-  const sW = cfg.strideW;
-  const dH = cfg.dilationH;
-  const dW = cfg.dilationW;
-  const padTop = cfg.padTop;
-  const padLeft = cfg.padLeft;
-
-  // Strides into the flattened buffers, also baked at WGSL compile time.
-  const inRowStride = inW * inC;
-  const wKwStride = inC;
-  const wKhStride = kW * wKwStride;
-  const wOcStride = kH * wKhStride;
-  let activation = 'acc';
-  if (cfg.activation?.kind === 'leakyReluThenMax') {
-    activation = `max(select(acc * ${formatFloat(cfg.activation.alpha)}, acc, acc >= 0.0), ${formatFloat(cfg.activation.maxScalar)})`;
-  }
-
-  return /* wgsl */`
-    @group(0) @binding(0) var<storage, read> inputBuf: array<f32>;
-    @group(0) @binding(1) var<storage, read> weightsBuf: array<f32>;
-    @group(0) @binding(2) var<storage, read> biasBuf: array<f32>;
-    @group(0) @binding(3) var<storage, read_write> outputBuf: array<f32>;
-
-    const IN_H: i32 = ${inH};
-    const IN_W: i32 = ${inW};
-    const IN_C: u32 = ${inC}u;
-    const OUT_H: u32 = ${outH}u;
-    const OUT_W: u32 = ${outW}u;
-    const OUT_C: u32 = ${outC}u;
-    const K_H: u32 = ${kH}u;
-    const K_W: u32 = ${kW}u;
-    const STRIDE_H: i32 = ${sH};
-    const STRIDE_W: i32 = ${sW};
-    const DIL_H: i32 = ${dH};
-    const DIL_W: i32 = ${dW};
-    const PAD_TOP: i32 = ${padTop};
-    const PAD_LEFT: i32 = ${padLeft};
-    const IN_ROW_STRIDE: u32 = ${inRowStride}u;
-    const W_KW_STRIDE: u32 = ${wKwStride}u;
-    const W_KH_STRIDE: u32 = ${wKhStride}u;
-    const W_OC_STRIDE: u32 = ${wOcStride}u;
-
-    @compute @workgroup_size(${CONV_WG_W}, ${CONV_WG_H}, ${CONV_WG_C})
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-      let ow: u32 = gid.x;
-      let oh: u32 = gid.y;
-      let oc: u32 = gid.z;
-      if (ow >= OUT_W || oh >= OUT_H || oc >= OUT_C) {
-        return;
-      }
-
-      var acc: f32 = biasBuf[oc];
-      let wOcBase: u32 = oc * W_OC_STRIDE;
-
-      for (var kh: u32 = 0u; kh < K_H; kh = kh + 1u) {
-        let inY: i32 = i32(oh) * STRIDE_H + i32(kh) * DIL_H - PAD_TOP;
-        if (inY < 0 || inY >= IN_H) { continue; }
-        let inRowBase: u32 = u32(inY) * IN_ROW_STRIDE;
-        let wKhBase: u32 = wOcBase + kh * W_KH_STRIDE;
-
-        for (var kw: u32 = 0u; kw < K_W; kw = kw + 1u) {
-          let inX: i32 = i32(ow) * STRIDE_W + i32(kw) * DIL_W - PAD_LEFT;
-          if (inX < 0 || inX >= IN_W) { continue; }
-          let inPixBase: u32 = inRowBase + u32(inX) * IN_C;
-          let wKwBase: u32 = wKhBase + kw * W_KW_STRIDE;
-
-          for (var ic: u32 = 0u; ic < IN_C; ic = ic + 1u) {
-            acc = acc + inputBuf[inPixBase + ic] * weightsBuf[wKwBase + ic];
-          }
-        }
-      }
-
-      let outIdx: u32 = (oh * OUT_W + ow) * OUT_C + oc;
-      outputBuf[outIdx] = ${activation};
-    }
-  `;
-}
-
-export function conv1dNcwShader(cfg) {
-  const [, inC, inW] = cfg.inShape;
-  const [, outC, outW] = cfg.outShape;
-  const [, , kW] = cfg.weightShape;
-  return /* wgsl */`
-    @group(0) @binding(0) var<storage, read> inputBuf: array<f32>;
-    @group(0) @binding(1) var<storage, read> weightsBuf: array<f32>;
-    @group(0) @binding(2) var<storage, read> biasBuf: array<f32>;
-    @group(0) @binding(3) var<storage, read_write> outputBuf: array<f32>;
-
-    const IN_C: u32 = ${inC}u;
-    const IN_W: i32 = ${inW};
-    const OUT_C: u32 = ${outC}u;
-    const OUT_W: u32 = ${outW}u;
-    const K_W: u32 = ${kW}u;
-    const STRIDE_W: i32 = ${cfg.strideW};
-    const DIL_W: i32 = ${cfg.dilationW};
-    const PAD_LEFT: i32 = ${cfg.padLeft};
-
-    @compute @workgroup_size(${CONV_WG_W}, ${CONV_WG_H}, 1)
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-      let ow: u32 = gid.x;
-      let oc: u32 = gid.y;
-      if (ow >= OUT_W || oc >= OUT_C) { return; }
-
-      var acc: f32 = biasBuf[oc];
-      for (var ic: u32 = 0u; ic < IN_C; ic = ic + 1u) {
-        for (var kw: u32 = 0u; kw < K_W; kw = kw + 1u) {
-          let iw: i32 = i32(ow) * STRIDE_W + i32(kw) * DIL_W - PAD_LEFT;
-          if (iw < 0 || iw >= IN_W) { continue; }
-          acc = acc + inputBuf[ic * u32(IN_W) + u32(iw)] * weightsBuf[(oc * IN_C + ic) * K_W + kw];
-        }
-      }
-      outputBuf[oc * OUT_W + ow] = acc;
-    }
-  `;
-}
-
-export function conv2dNchwShader(cfg) {
-  const [, inC, inH, inW] = cfg.inShape;
-  const [, outC, outH, outW] = cfg.outShape;
-  const [, , kH, kW] = cfg.weightShape;
-  return /* wgsl */`
-    @group(0) @binding(0) var<storage, read> inputBuf: array<f32>;
-    @group(0) @binding(1) var<storage, read> weightsBuf: array<f32>;
-    @group(0) @binding(2) var<storage, read> biasBuf: array<f32>;
-    @group(0) @binding(3) var<storage, read_write> outputBuf: array<f32>;
-
-    const IN_C: u32 = ${inC}u;
-    const IN_H: i32 = ${inH};
-    const IN_W: i32 = ${inW};
-    const OUT_C: u32 = ${outC}u;
-    const OUT_H: u32 = ${outH}u;
-    const OUT_W: u32 = ${outW}u;
-    const K_H: u32 = ${kH}u;
-    const K_W: u32 = ${kW}u;
-    const STRIDE_H: i32 = ${cfg.strideH};
-    const STRIDE_W: i32 = ${cfg.strideW};
-    const DIL_H: i32 = ${cfg.dilationH};
-    const DIL_W: i32 = ${cfg.dilationW};
-    const PAD_TOP: i32 = ${cfg.padTop};
-    const PAD_LEFT: i32 = ${cfg.padLeft};
-
-    @compute @workgroup_size(${CONV_WG_W}, ${CONV_WG_H}, ${CONV_WG_C})
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-      let ow: u32 = gid.x;
-      let oh: u32 = gid.y;
-      let oc: u32 = gid.z;
-      if (ow >= OUT_W || oh >= OUT_H || oc >= OUT_C) { return; }
-
-      var acc: f32 = biasBuf[oc];
-      for (var ic: u32 = 0u; ic < IN_C; ic = ic + 1u) {
-        for (var kh: u32 = 0u; kh < K_H; kh = kh + 1u) {
-          let ih: i32 = i32(oh) * STRIDE_H + i32(kh) * DIL_H - PAD_TOP;
-          if (ih < 0 || ih >= IN_H) { continue; }
-          for (var kw: u32 = 0u; kw < K_W; kw = kw + 1u) {
-            let iw: i32 = i32(ow) * STRIDE_W + i32(kw) * DIL_W - PAD_LEFT;
-            if (iw < 0 || iw >= IN_W) { continue; }
-            let inIdx: u32 = (ic * u32(IN_H) + u32(ih)) * u32(IN_W) + u32(iw);
-            let wIdx: u32 = ((oc * IN_C + ic) * K_H + kh) * K_W + kw;
-            acc = acc + inputBuf[inIdx] * weightsBuf[wIdx];
-          }
-        }
-      }
-      outputBuf[(oc * OUT_H + oh) * OUT_W + ow] = acc;
-    }
-  `;
-}
 
 /** Workgroup sizes for CONV_2D dispatch - main thread uses these to
  *  compute the workgroup count from output dims. */
@@ -229,13 +47,11 @@ export const COMPAT_CONV_DISPATCH_WORKGROUP = [COMPAT_CONV_WG_W, COMPAT_CONV_WG_
 export const MATMUL_DISPATCH_WORKGROUP = [MATMUL_WG_W, MATMUL_WG_H, 1];
 
 /**
- * Compatibility Conv shader for fragile Android/WebView WebGPU drivers.
- *
- * Unlike the fast Conv shaders above, this keeps shape/stride/padding
- * values in a uniform buffer and uses a 1x1x1 workgroup. That gives the
- * compiler less opportunity to specialize or unroll each layer at pipeline
- * creation time, at the cost of slower inference. Intended for tester-only
- * device triage, not the high-performance live path.
+ * NHWC (TFLite) Conv shader.  Shape/stride/padding live in a uniform
+ * buffer so one small generic module serves every layer - safe on
+ * fragile shader compilers that choke on big specialized kernels.
+ * Supports the fused leakyReluThenMax activation via the params
+ * uniform (activationKind = 1).
  */
 export function compatConv2dNhwcShader() {
   return /* wgsl */`
@@ -334,7 +150,22 @@ export function compatConv1dNcwShader() {
   `;
 }
 
+/**
+ * Each invocation of the NCHW compat Conv computes this many adjacent
+ * outputs along W with a vec4 accumulator.  The runner divides its X
+ * dispatch by this factor.
+ */
+export const COMPAT_CONV_W_VECTOR = 4;
+
 export function compatConv2dNchwShader() {
+  // Vectorized 4-wide along output W: each invocation produces four
+  // horizontally adjacent outputs.  Every weight is loaded once and
+  // reused across the four lanes (4x less weight traffic), and the
+  // multiply-accumulate runs as a vec4 fma - Mali-class GPUs execute
+  // scalar f32 MADs at a fraction of their SIMD width, so this is the
+  // difference between usable and not on compatibility-tier devices.
+  // Keeps the uniform params and simple un-unrolled loops that fragile
+  // shader compilers require (see compatConv2dNhwcShader docs).
   return /* wgsl */`
     struct ConvCompatParams {
       dims0: vec4<i32>,  // inC, inH, inW, outC
@@ -352,7 +183,7 @@ export function compatConv2dNchwShader() {
 
     @compute @workgroup_size(${COMPAT_CONV_WG_W}, ${COMPAT_CONV_WG_H}, ${COMPAT_CONV_WG_C})
     fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-      let ow: u32 = gid.x;
+      let owBase: u32 = gid.x * ${COMPAT_CONV_W_VECTOR}u;
       let oh: u32 = gid.y;
       let oc: u32 = gid.z;
       let inC: u32 = u32(p.dims0.x);
@@ -363,23 +194,38 @@ export function compatConv2dNchwShader() {
       let outW: u32 = u32(p.dims1.y);
       let kH: u32 = u32(p.dims1.z);
       let kW: u32 = u32(p.dims1.w);
-      if (ow >= outW || oh >= outH || oc >= outC) { return; }
+      if (owBase >= outW || oh >= outH || oc >= outC) { return; }
 
-      var acc: f32 = biasBuf[oc];
+      let sW: i32 = p.steps0.y;
+      var acc: vec4<f32> = vec4<f32>(biasBuf[oc]);
       for (var ic: u32 = 0u; ic < inC; ic = ic + 1u) {
+        let inIcBase: u32 = ic * u32(inH) * u32(inW);
+        let wIcBase: u32 = ((oc * inC + ic) * kH) * kW;
         for (var kh: u32 = 0u; kh < kH; kh = kh + 1u) {
           let ih: i32 = i32(oh) * p.steps0.x + i32(kh) * p.steps0.z - p.pad0.x;
           if (ih < 0 || ih >= inH) { continue; }
+          let rowBase: u32 = inIcBase + u32(ih) * u32(inW);
+          let wRowBase: u32 = wIcBase + kh * kW;
           for (var kw: u32 = 0u; kw < kW; kw = kw + 1u) {
-            let iw: i32 = i32(ow) * p.steps0.y + i32(kw) * p.steps0.w - p.pad0.y;
-            if (iw < 0 || iw >= inW) { continue; }
-            let inIdx: u32 = (ic * u32(inH) + u32(ih)) * u32(inW) + u32(iw);
-            let wIdx: u32 = ((oc * inC + ic) * kH + kh) * kW + kw;
-            acc = acc + inputBuf[inIdx] * weightsBuf[wIdx];
+            let w: f32 = weightsBuf[wRowBase + kw];
+            let x0: i32 = i32(owBase) * sW + i32(kw) * p.steps0.w - p.pad0.y;
+            let x1: i32 = x0 + sW;
+            let x2: i32 = x1 + sW;
+            let x3: i32 = x2 + sW;
+            var v: vec4<f32> = vec4<f32>(0.0);
+            if (x0 >= 0 && x0 < inW) { v.x = inputBuf[rowBase + u32(x0)]; }
+            if (x1 >= 0 && x1 < inW) { v.y = inputBuf[rowBase + u32(x1)]; }
+            if (x2 >= 0 && x2 < inW) { v.z = inputBuf[rowBase + u32(x2)]; }
+            if (x3 >= 0 && x3 < inW) { v.w = inputBuf[rowBase + u32(x3)]; }
+            acc = fma(v, vec4<f32>(w), acc);
           }
         }
       }
-      outputBuf[(oc * outH + oh) * outW + ow] = acc;
+      let outRow: u32 = (oc * outH + oh) * outW;
+      outputBuf[outRow + owBase] = acc.x;
+      if (owBase + 1u < outW) { outputBuf[outRow + owBase + 1u] = acc.y; }
+      if (owBase + 2u < outW) { outputBuf[outRow + owBase + 2u] = acc.z; }
+      if (owBase + 3u < outW) { outputBuf[outRow + owBase + 3u] = acc.w; }
     }
   `;
 }

@@ -53,7 +53,6 @@ export class VwwInference {
    */
   constructor(device, featureConfig = null, options = {}) {
     this._device = device;
-    this._gpuCompatibilityMode = options.gpuCompatibilityMode === true;
     this._log = options.log || null;
     this._pipelineLog = options.pipelineLog === true;
     this._featureConfig = { ...DEFAULT_FEATURE_CONFIG, ...(featureConfig || {}) };
@@ -101,7 +100,6 @@ export class VwwInference {
   async addKeyword(name, compiled, ctcConfig = null) {
     if (this._keywords.has(name)) return;
     const runner = await GpuModelRunner.create(this._device, compiled, {
-      gpuCompatibilityMode: this._gpuCompatibilityMode,
       log: this._log,
       pipelineLog: this._pipelineLog,
     });
@@ -186,6 +184,24 @@ export class VwwInference {
       }
     }
     return { probs, ctc };
+  }
+
+  /**
+   * Append a chunk to the audio ring and update the incremental log-mel
+   * window WITHOUT running GPU inference.  Used by the worker to absorb
+   * stale chunks when inference can't keep up with real time: the
+   * window stays gap-free while only fresh chunks pay for the CNN.
+   * The mel update costs ~1 ms of CPU vs >100 ms of GPU on the devices
+   * where this matters.  Must be called exactly once per chunk - the
+   * incremental extractor assumes one CHUNK_SAMPLES slide per call.
+   */
+  ingestChunk(samples) {
+    if (samples.length !== CHUNK_SAMPLES) {
+      throw new Error(`VWW chunk must be ${CHUNK_SAMPLES} samples, got ${samples.length}`);
+    }
+    this._appendRing(samples);
+    if (this._ringFilled < this._windowSamples) return;
+    this._extractLogMel();
   }
 
   /** Reset the audio buffer state.  Doesn't unload models. */

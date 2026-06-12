@@ -31,11 +31,9 @@
  */
 
 import {
-  conv2dShader,
-  conv1dNcwShader,
-  conv2dNchwShader,
   CONV_DISPATCH_WORKGROUP,
   COMPAT_CONV_DISPATCH_WORKGROUP,
+  COMPAT_CONV_W_VECTOR,
   compatConv2dNhwcShader,
   compatConv1dNcwShader,
   compatConv2dNchwShader,
@@ -82,7 +80,6 @@ export class GpuModelRunner {
   constructor(device, compiled, options = {}) {
     this._device = device;
     this._compiled = compiled;
-    this._compatibilityMode = options.gpuCompatibilityMode === true;
     this._log = options.log || null;
     this._pipelineLog = options.pipelineLog === true;
     // Map<tensorId, GPUBuffer> for constants (weights/biases) loaded once.
@@ -169,7 +166,6 @@ export class GpuModelRunner {
       label,
       opIndex: this._buildOpIndex,
       opName: this._buildOpName,
-      compat: this._compatibilityMode === true,
     };
     this._logPipelineStep('module:start', detail);
     await checkpointVwwStartup('pipeline:module:start', detail);
@@ -205,7 +201,7 @@ export class GpuModelRunner {
     if (!this._pipelineLog) return;
     this._log?.log?.(
       'diag',
-      `VWW GPU ${this._compatibilityMode ? 'compat ' : ''}pipeline ${step} `
+      `VWW GPU pipeline ${step} `
       + `op=${detail.opIndex}:${detail.opName} label=${detail.label}`,
     );
   }
@@ -466,34 +462,21 @@ export class GpuModelRunner {
     const [, kernelH, kernelW] = wMeta.shape;
     const pad = computePadding(padding, inH, inW, kernelH, kernelW, strideH, strideW, dilationH, dilationW, outH, outW);
 
-    const useCompat = this._compatibilityMode === true;
-    const wgsl = useCompat
-      ? compatConv2dNhwcShader()
-      : conv2dShader({
-          inShape: inMeta.shape,
-          outShape: outMeta.shape,
-          weightShape: wMeta.shape,
-          strideH, strideW, dilationH, dilationW,
-          padTop: pad.top,
-          padLeft: pad.left,
-          activation: fused?.activation,
-        });
-    const pipeline = await this._createComputePipeline(wgsl, useCompat ? 'conv.compat.nhwc' : 'conv');
+    const wgsl = compatConv2dNhwcShader();
+    const pipeline = await this._createComputePipeline(wgsl, 'conv.nhwc');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const weightsBuf = this._bufferFor(op.inputs[1]);
     const biasBuf = this._bufferFor(op.inputs[2]);
     const outputBuf = this._bufferFor(outId);
-    const paramsBuf = useCompat
-      ? this._createCompatConvParams(
-          [
-            inH, inW, inMeta.shape[3],
-            outH, outW, outputChannels, kernelH, kernelW,
-            strideH, strideW, dilationH, dilationW,
-            pad.top, pad.left, fused?.activation?.kind === 'leakyReluThenMax' ? 1 : 0, 0,
-          ],
-          [fused?.activation?.alpha ?? 0, fused?.activation?.maxScalar ?? 0, 0, 0],
-        )
-      : null;
+    const paramsBuf = this._createCompatConvParams(
+      [
+        inH, inW, inMeta.shape[3],
+        outH, outW, outputChannels, kernelH, kernelW,
+        strideH, strideW, dilationH, dilationW,
+        pad.top, pad.left, fused?.activation?.kind === 'leakyReluThenMax' ? 1 : 0, 0,
+      ],
+      [fused?.activation?.alpha ?? 0, fused?.activation?.maxScalar ?? 0, 0, 0],
+    );
     const bindGroup = this._device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -501,12 +484,12 @@ export class GpuModelRunner {
         { binding: 1, resource: { buffer: weightsBuf } },
         { binding: 2, resource: { buffer: biasBuf } },
         { binding: 3, resource: { buffer: outputBuf } },
-        ...(paramsBuf ? [{ binding: 4, resource: { buffer: paramsBuf } }] : []),
+        { binding: 4, resource: { buffer: paramsBuf } },
       ],
     });
     const [outBatch, outHt, outWd, outC] = outMeta.shape;
     void outBatch;
-    const wg = useCompat ? COMPAT_CONV_DISPATCH_WORKGROUP : CONV_DISPATCH_WORKGROUP;
+    const wg = COMPAT_CONV_DISPATCH_WORKGROUP;
     const dispatchX = Math.ceil(outWd / wg[0]);
     const dispatchY = Math.ceil(outHt / wg[1]);
     const dispatchZ = Math.ceil(outC / wg[2]);
@@ -520,63 +503,38 @@ export class GpuModelRunner {
     const strides = onnxIntsAttr(op, 'strides') || new Array(inMeta.shape.length - 2).fill(1);
     const pads = onnxIntsAttr(op, 'pads') || new Array((inMeta.shape.length - 2) * 2).fill(0);
     const dilations = onnxIntsAttr(op, 'dilations') || new Array(inMeta.shape.length - 2).fill(1);
-    const useCompat = this._compatibilityMode === true;
     let wgsl;
     let dispatchX;
     let dispatchY;
     let dispatchZ;
-    let paramsBuf = null;
+    let paramsBuf;
+    const wg = COMPAT_CONV_DISPATCH_WORKGROUP;
     if (inMeta.shape.length === 3) {
-      wgsl = useCompat
-        ? compatConv1dNcwShader()
-        : conv1dNcwShader({
-            inShape: inMeta.shape,
-            outShape: outMeta.shape,
-            weightShape: wMeta.shape,
-            strideW: strides[0],
-            dilationW: dilations[0],
-            padLeft: pads[0],
-          });
-      if (useCompat) {
-        paramsBuf = this._createCompatConvParams([
-          inMeta.shape[1], inMeta.shape[2], outMeta.shape[1], outMeta.shape[2],
-          wMeta.shape[2], 0, 0, 0,
-          strides[0], dilations[0], 0, 0,
-          pads[0], 0, 0, 0,
-        ]);
-      }
-      const wg = useCompat ? COMPAT_CONV_DISPATCH_WORKGROUP : CONV_DISPATCH_WORKGROUP;
+      wgsl = compatConv1dNcwShader();
+      paramsBuf = this._createCompatConvParams([
+        inMeta.shape[1], inMeta.shape[2], outMeta.shape[1], outMeta.shape[2],
+        wMeta.shape[2], 0, 0, 0,
+        strides[0], dilations[0], 0, 0,
+        pads[0], 0, 0, 0,
+      ]);
       dispatchX = Math.ceil(outMeta.shape[2] / wg[0]);
       dispatchY = Math.ceil(outMeta.shape[1] / wg[1]);
       dispatchZ = 1;
     } else {
-      wgsl = useCompat
-        ? compatConv2dNchwShader()
-        : conv2dNchwShader({
-            inShape: inMeta.shape,
-            outShape: outMeta.shape,
-            weightShape: wMeta.shape,
-            strideH: strides[0],
-            strideW: strides[1],
-            dilationH: dilations[0],
-            dilationW: dilations[1],
-            padTop: pads[0],
-            padLeft: pads[1],
-          });
-      if (useCompat) {
-        paramsBuf = this._createCompatConvParams([
-          inMeta.shape[1], inMeta.shape[2], inMeta.shape[3], outMeta.shape[1],
-          outMeta.shape[2], outMeta.shape[3], wMeta.shape[2], wMeta.shape[3],
-          strides[0], strides[1], dilations[0], dilations[1],
-          pads[0], pads[1], 0, 0,
-        ]);
-      }
-      const wg = useCompat ? COMPAT_CONV_DISPATCH_WORKGROUP : CONV_DISPATCH_WORKGROUP;
-      dispatchX = Math.ceil(outMeta.shape[3] / wg[0]);
+      wgsl = compatConv2dNchwShader();
+      paramsBuf = this._createCompatConvParams([
+        inMeta.shape[1], inMeta.shape[2], inMeta.shape[3], outMeta.shape[1],
+        outMeta.shape[2], outMeta.shape[3], wMeta.shape[2], wMeta.shape[3],
+        strides[0], strides[1], dilations[0], dilations[1],
+        pads[0], pads[1], 0, 0,
+      ]);
+      // The vectorized NCHW shader covers COMPAT_CONV_W_VECTOR outputs
+      // along W per invocation.
+      dispatchX = Math.ceil(outMeta.shape[3] / (wg[0] * COMPAT_CONV_W_VECTOR));
       dispatchY = Math.ceil(outMeta.shape[2] / wg[1]);
       dispatchZ = Math.ceil(outMeta.shape[1] / wg[2]);
     }
-    const pipeline = await this._createComputePipeline(wgsl, useCompat ? 'conv.compat.onnx' : 'conv');
+    const pipeline = await this._createComputePipeline(wgsl, 'conv.onnx');
     const inputBuf = this._bufferFor(op.inputs[0]);
     const weightsBuf = this._bufferFor(op.inputs[1]);
     const biasBuf = op.inputs[2] !== undefined

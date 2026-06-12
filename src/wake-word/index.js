@@ -772,12 +772,15 @@ export class WakeWordManager {
     while (this._sampleBufLen >= CHUNK_SIZE) {
       if (this._frameQueue.length >= MAX_QUEUE) {
         const dropped = this._frameQueue.shift();
-        if (this._framePool.length < MAX_POOL) this._framePool.push(dropped);
+        if (this._framePool.length < MAX_POOL) this._framePool.push(dropped.buf);
         droppedFrames++;
       }
       const buf = this._framePool.pop() || new Float32Array(CHUNK_SIZE);
       buf.set(this._sampleBuf.subarray(0, CHUNK_SIZE));
-      this._frameQueue.push(buf);
+      // Capture timestamp rides along so slow-inference devices can
+      // detect frames that aged in this queue and fast-ingest them
+      // (see WorkerProxyBackend.processChunk).
+      this._frameQueue.push({ buf, t: Date.now() });
       this._sampleBuf.copyWithin(0, CHUNK_SIZE, this._sampleBufLen);
       this._sampleBufLen -= CHUNK_SIZE;
     }
@@ -807,8 +810,8 @@ export class WakeWordManager {
           if (this._inference?.reset) this._inference.reset();
         }
         const frame = this._frameQueue.shift();
-        const result = await this._inference.processChunk(frame);
-        if (this._framePool.length < MAX_POOL) this._framePool.push(frame);
+        const result = await this._inference.processChunk(frame.buf, frame.t);
+        if (this._framePool.length < MAX_POOL) this._framePool.push(frame.buf);
         if (result.detected) {
           const triggerBits = [];
           if (result.triggerType) triggerBits.push(`type=${result.triggerType}`);

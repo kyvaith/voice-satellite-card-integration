@@ -1083,9 +1083,6 @@ class VoiceSatellitePanel extends HTMLElement {
           height: 16px;
           flex: 0 0 auto;
         }
-        .${P}-tester-vww-compat-row.is-hidden {
-          display: none;
-        }
         .${P}-tester-model {
           flex: 1;
           background: var(--secondary-background-color, #2c2c2e);
@@ -1427,14 +1424,6 @@ class VoiceSatellitePanel extends HTMLElement {
             <option value="Moderately sensitive" selected>Moderately sensitive</option>
             <option value="Very sensitive">Very sensitive</option>
           </select>
-        </div>
-
-        <div class="${P}-tester-row ${P}-tester-vww-compat-row is-hidden">
-          <div class="${P}-tester-label">VWW GPU</div>
-          <label class="${P}-tester-check-label" for="${P}-tester-vww-compat">
-            <input type="checkbox" id="${P}-tester-vww-compat">
-            Compatibility Conv shaders
-          </label>
         </div>
 
         <div class="${P}-tester-meter-row">
@@ -1861,8 +1850,6 @@ class VoiceSatellitePanel extends HTMLElement {
     const engineSelect = card.querySelector(`#${P}-tester-engine`);
     const modelSelect = card.querySelector(`#${P}-tester-model`);
     const sensitivitySelect = card.querySelector(`#${P}-tester-sensitivity`);
-    const vwwCompatRow = card.querySelector(`.${P}-tester-vww-compat-row`);
-    const vwwCompatInput = card.querySelector(`#${P}-tester-vww-compat`);
     const toggleBtn = card.querySelector(`.${P}-tester-toggle`);
     const thresholdValEl = card.querySelector(`.${P}-tester-threshold-val`);
     const latencySignalEl = card.querySelector(`.${P}-tester-latency-signal`);
@@ -1950,15 +1937,6 @@ class VoiceSatellitePanel extends HTMLElement {
     this._testerEngine = engineSelect?.value || 'mww';
     this._testerSelectedModel = modelSelect.value;
     this._testerSensitivity = sensitivitySelect?.value || 'Moderately sensitive';
-    this._testerVwwCompatMode = false;
-
-    const syncVwwCompatVisibility = () => {
-      const isVww = (engineSelect?.value || 'mww') === 'vww';
-      vwwCompatRow?.classList.toggle('is-hidden', !isVww);
-      if (vwwCompatInput) vwwCompatInput.disabled = !isVww;
-      if (!isVww) this._testerVwwCompatMode = false;
-    };
-    syncVwwCompatVisibility();
 
     let thresholdUpdateSeq = 0;
     const updateThresholdForModel = async () => {
@@ -1969,7 +1947,6 @@ class VoiceSatellitePanel extends HTMLElement {
       this._testerEngine = engine;
       this._testerSelectedModel = name;
       this._testerSensitivity = sensitivity;
-      this._testerVwwCompatMode = engine === 'vww' && vwwCompatInput?.checked === true;
       // OWW: absolute offset from base cutoff (0.5 wake / 0.65 stop).
       // MWW: per-model cutoff modulated by the margin-factor sensitivity.
       // Mirrors getThresholdForModel() in src/wake-word/index.js so the
@@ -2059,18 +2036,6 @@ class VoiceSatellitePanel extends HTMLElement {
       }
     });
 
-    vwwCompatInput?.addEventListener('change', async () => {
-      this._testerVwwCompatMode = (engineSelect?.value || 'mww') === 'vww' && vwwCompatInput.checked === true;
-      this._appendTesterLog(
-        'info',
-        `VWW compatibility Conv shaders ${this._testerVwwCompatMode ? 'enabled' : 'disabled'} for tester`,
-      );
-      if (this._testerSession?.running) {
-        await this._stopTesterSession();
-        await this._startTesterSession();
-      }
-    });
-
     toggleBtn.addEventListener('click', async () => {
       if (this._testerSession?.running) {
         await this._stopTesterSession();
@@ -2142,7 +2107,6 @@ class VoiceSatellitePanel extends HTMLElement {
         threshold: this._testerThreshold,
         energyGateEnabled: noiseGateOn,
         sensitivityLabel: this._testerSensitivity || 'Moderately sensitive',
-        vwwGpuCompatibilityMode: this._testerEngine === 'vww' && this._testerVwwCompatMode === true,
         constraints: {
           echoCancellation: dsp.echoCancellation === true,
           noiseSuppression: dsp.noiseSuppression === true,
@@ -2162,7 +2126,7 @@ class VoiceSatellitePanel extends HTMLElement {
       const engineLabel = this._testerEngine === 'oww'
         ? 'openWakeWord'
         : this._testerEngine === 'vww'
-          ? `vsWakeWord${this._testerVwwCompatMode ? ', GPU compatibility' : ''}`
+          ? 'vsWakeWord'
           : 'microWakeWord';
       this._appendTesterLog(
         'info',

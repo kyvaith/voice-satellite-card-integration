@@ -67,8 +67,6 @@ export class WorkerProxyBackend {
    * @param {boolean} [options.energyGateEnabled=true]
    * @param {string} [options.sensitivityLabel='Moderately sensitive']
    * @param {boolean} [options.enableTimings=false] - tester-only diagnostics
-   * @param {boolean} [options.vwwGpuCompatibilityMode=false] - tester-only
-   *   safe Conv shader path for fragile WebGPU drivers.
    * @param {object} [options.log] - logger (forwarded for unsolicited worker logs)
    * @returns {Promise<WorkerProxyBackend>}
    */
@@ -100,7 +98,6 @@ export class WorkerProxyBackend {
       energyGateEnabled: options.energyGateEnabled !== false,
       sensitivityLabel: options.sensitivityLabel || 'Moderately sensitive',
       enableTimings: options.enableTimings === true,
-      vwwGpuCompatibilityMode: options.vwwGpuCompatibilityMode === true,
     }, INIT_TIMEOUT_MS);
     if (initResult?.cutoffs) {
       for (const [name, cutoff] of Object.entries(initResult.cutoffs)) {
@@ -194,13 +191,21 @@ export class WorkerProxyBackend {
    * Process one audio chunk.  Returns a Promise of the result shape:
    *   {detected, score, model, cutoff, rms, triggerType?, perModelScores}
    */
-  async processChunk(samples) {
+  async processChunk(samples, capturedAt = null) {
     // Defensive copy: we don't transfer the underlying ArrayBuffer
     // (the audio path recycles its frame buffer in a pool), so a
     // structured clone happens implicitly.  At ~5 KB / 80 ms = 62 KB/s
     // this is negligible compared to the inference cost we just moved
     // off the main thread.
-    return this._send('processChunk', samples);
+    //
+    // `capturedAt` (epoch ms, from the caller's frame queue) lets the
+    // worker detect chunks that aged in a queue while a slow inference
+    // ran (compatibility-tier GPUs take >80 ms per chunk).  Stale
+    // chunks get their audio ingested into the feature window but skip
+    // the GPU run, so the pipeline stays at real time instead of
+    // accruing unbounded lag.  (Epoch ms, not performance.now - the
+    // worker has a different performance.timeOrigin.)
+    return this._send('processChunk', { samples, t: capturedAt ?? Date.now() });
   }
 
   addKeyword(cfg) {

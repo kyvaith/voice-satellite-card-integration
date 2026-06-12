@@ -153,7 +153,13 @@ export class OwwBackend {
     // chunk on a Pixel-class tablet - over our 80 ms real-time budget.
     // Devices without WebGPU support can't sustain OWW; the manager
     // surfaces a toast suggesting microWakeWord instead.
-    const device = await acquireWebGpuDevice();
+    const { device, compatibilityTier } = await acquireWebGpuDevice();
+    if (compatibilityTier) {
+      log?.log?.(
+        'wake-word',
+        'OWW: WebGPU compatibility-tier adapter (GLES-backed) acquired',
+      );
+    }
 
     const shared = await loadOwwSharedModels();
     const classifiers = {};

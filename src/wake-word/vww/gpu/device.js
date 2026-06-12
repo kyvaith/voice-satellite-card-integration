@@ -26,7 +26,16 @@ export class WebGpuUnavailableError extends Error {
  * Acquire a `GPUDevice` for the embedding-model runner.  Throws
  * WebGpuUnavailableError if the browser/runtime can't deliver one.
  *
- * @returns {Promise<GPUDevice>}
+ * Tries a core adapter first, then falls back to a compatibility-tier
+ * adapter (`featureLevel: 'compatibility'`).  Chrome backs the compat
+ * tier with OpenGL ES instead of Vulkan, which unlocks hardware WebGPU
+ * on devices the core tier blocklists - e.g. Android 11 tablets, where
+ * core requestAdapter() always returns null but a real Mali/Adreno
+ * compat adapter is available.  Compat limits (128 invocations per
+ * workgroup, 4+ storage buffers) comfortably cover our shaders (max
+ * workgroup 64, max 4 storage buffers).
+ *
+ * @returns {Promise<{device: GPUDevice, compatibilityTier: boolean}>}
  */
 export async function acquireWebGpuDevice() {
   await checkpointVwwStartup('device:begin');
@@ -38,6 +47,7 @@ export async function acquireWebGpuDevice() {
   }
 
   let adapter;
+  let compatibilityTier = false;
   try {
     await checkpointVwwStartup('device:request-adapter');
     adapter = await navigator.gpu.requestAdapter();
@@ -45,8 +55,17 @@ export async function acquireWebGpuDevice() {
     throw new WebGpuUnavailableError(`requestAdapter threw: ${e?.message || e}`);
   }
   if (!adapter) {
+    try {
+      await checkpointVwwStartup('device:request-adapter-compat');
+      adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
+      compatibilityTier = !!adapter;
+    } catch (_e) {
+      // Older browsers may reject the option dictionary - treat as null.
+    }
+  }
+  if (!adapter) {
     throw new WebGpuUnavailableError(
-      'WebGPU adapter request returned null - no compatible GPU driver',
+      'WebGPU adapter request returned null for both core and compatibility tiers - no compatible GPU driver',
     );
   }
 
@@ -54,6 +73,7 @@ export async function acquireWebGpuDevice() {
   try {
     await checkpointVwwStartup('device:request-device', {
       adapterInfo: summarizeAdapterInfo(adapter),
+      compatibilityTier,
     });
     // We don't need any non-default features.  The default storage-buffer
     // size limit is 128 MiB which is plenty for our ~1.3 MB of weights
@@ -84,9 +104,10 @@ export async function acquireWebGpuDevice() {
   await checkpointVwwStartup('device:ready', {
     adapterInfo: summarizeAdapterInfo(adapter),
     limits: summarizeDeviceLimits(device),
+    compatibilityTier,
   });
 
-  return device;
+  return { device, compatibilityTier };
 }
 
 function summarizeAdapterInfo(adapter) {

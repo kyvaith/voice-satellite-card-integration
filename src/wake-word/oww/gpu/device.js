@@ -24,7 +24,13 @@ export class WebGpuUnavailableError extends Error {
  * Acquire a `GPUDevice` for the embedding-model runner.  Throws
  * WebGpuUnavailableError if the browser/runtime can't deliver one.
  *
- * @returns {Promise<GPUDevice>}
+ * Tries a core adapter first, then falls back to a compatibility-tier
+ * adapter (`featureLevel: 'compatibility'`).  Chrome backs the compat
+ * tier with OpenGL ES instead of Vulkan, which unlocks hardware WebGPU
+ * on devices the core tier blocklists (e.g. Android 11 tablets).  Our
+ * shaders fit compat limits: max workgroup 64 vs the 128 cap.
+ *
+ * @returns {Promise<{device: GPUDevice, compatibilityTier: boolean}>}
  */
 export async function acquireWebGpuDevice() {
   if (typeof navigator === 'undefined' || !navigator.gpu) {
@@ -34,14 +40,23 @@ export async function acquireWebGpuDevice() {
   }
 
   let adapter;
+  let compatibilityTier = false;
   try {
     adapter = await navigator.gpu.requestAdapter();
   } catch (e) {
     throw new WebGpuUnavailableError(`requestAdapter threw: ${e?.message || e}`);
   }
   if (!adapter) {
+    try {
+      adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
+      compatibilityTier = !!adapter;
+    } catch (_e) {
+      // Older browsers may reject the option dictionary - treat as null.
+    }
+  }
+  if (!adapter) {
     throw new WebGpuUnavailableError(
-      'WebGPU adapter request returned null - no compatible GPU driver',
+      'WebGPU adapter request returned null for both core and compatibility tiers - no compatible GPU driver',
     );
   }
 
@@ -73,5 +88,5 @@ export async function acquireWebGpuDevice() {
     }
   }).catch(() => {});
 
-  return device;
+  return { device, compatibilityTier };
 }

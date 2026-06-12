@@ -20,15 +20,26 @@ const WAKE_WORD_DETECTION_VWW = 'On Device (vsWakeWord)';
  * shape so engine-specific checks can produce their own messaging without
  * re-implementing the detection logic.
  *
+ * Mirrors the engines' acquisition logic: core adapter first, then the
+ * GLES-backed compatibility tier (which unlocks devices like Android 11
+ * tablets where the core Vulkan path is blocklisted).
+ *
  * @returns {Promise<{ok: true, desc: string} | {ok: false, reason: 'missing'|'no-adapter'|'probe-error', error?: any}>}
  */
 async function probeWebGpu() {
   if (!('gpu' in navigator)) return { ok: false, reason: 'missing' };
   try {
-    const adapter = await navigator.gpu.requestAdapter();
+    let adapter = await navigator.gpu.requestAdapter();
+    let tier = '';
+    if (!adapter) {
+      try {
+        adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
+        if (adapter) tier = ' (compatibility tier)';
+      } catch (_e) { /* option unsupported - treat as null */ }
+    }
     if (!adapter) return { ok: false, reason: 'no-adapter' };
     const info = adapter.info || {};
-    const desc = [info.vendor, info.architecture].filter(Boolean).join(' / ') || 'adapter available';
+    const desc = ([info.vendor, info.architecture].filter(Boolean).join(' / ') || 'adapter available') + tier;
     return { ok: true, desc };
   } catch (err) {
     return { ok: false, reason: 'probe-error', error: err };
@@ -347,7 +358,7 @@ export const CLIENT_CHECKS = [
       if (probe.reason === 'no-adapter') {
         return {
           status: 'fail',
-          detail: 'navigator.gpu is exposed but requestAdapter() returned null — the system has no usable GPU adapter for WebGPU.',
+          detail: 'navigator.gpu is exposed but requestAdapter() returned null for both the core and compatibility tiers — the system has no usable GPU adapter for WebGPU.',
           remediation: 'Switch "Wake word detection" to "On Device (microWakeWord)". On Android, ensure the WebView is up to date; on Linux, WebGPU requires a recent Chromium build with hardware acceleration enabled.',
         };
       }
@@ -386,7 +397,7 @@ export const CLIENT_CHECKS = [
       if (probe.reason === 'no-adapter') {
         return {
           status: 'fail',
-          detail: 'navigator.gpu is exposed but requestAdapter() returned null — the system has no usable GPU adapter for WebGPU.',
+          detail: 'navigator.gpu is exposed but requestAdapter() returned null for both the core and compatibility tiers — the system has no usable GPU adapter for WebGPU.',
           remediation: 'Switch "Wake word detection" to "On Device (microWakeWord)". On Android, ensure the WebView is up to date; on Linux, WebGPU requires a recent Chromium build with hardware acceleration enabled.',
         };
       }

@@ -207,11 +207,16 @@ export class VwwBackend {
     }
     await checkpointVwwStartup('backend:create', {
       models: keywordConfigs.map((cfg) => cfg.name),
-      compat: options.gpuCompatibilityMode === true,
     });
     // WebGPU is mandatory for vsWakeWord too (matches OWW). Devices
     // without WebGPU surface the same toast suggesting microWakeWord.
-    const device = await acquireWebGpuDevice();
+    const { device, compatibilityTier } = await acquireWebGpuDevice();
+    if (compatibilityTier) {
+      log?.log?.(
+        'wake-word',
+        'WebGPU compatibility-tier adapter (GLES-backed) acquired',
+      );
+    }
 
     // Load every keyword's manifest first so we can group them by
     // architecture.  All keywords sharing the same architecture use a
@@ -240,7 +245,6 @@ export class VwwBackend {
         device,
         sharedMelspec: firstEntry.sharedMelspec,
         sharedEmbedding: firstEntry.sharedEmbedding,
-        gpuCompatibilityMode: options.gpuCompatibilityMode === true,
         log,
         pipelineLog: options.pipelineLog === true,
       });
@@ -252,7 +256,6 @@ export class VwwBackend {
       const firstEntry = entries[keywordConfigs[0].name];
       const featureCfg = firstEntry.manifest?.feature_config || null;
       inference = new VwwInference(device, featureCfg, {
-        gpuCompatibilityMode: options.gpuCompatibilityMode === true,
         log,
         pipelineLog: options.pipelineLog === true,
       });
@@ -317,7 +320,7 @@ export class VwwBackend {
       `VWW backend ready: ${modesDesc} `
       + `(energy gate ${energyGateEnabled ? 'on' : 'off'}, `
       + `sensitivity=${sensitivityLabel}, sleep=${energy.sleep} wake=${energy.wake}`
-      + `${options.gpuCompatibilityMode === true ? ', gpu_compat=true' : ''})`,
+      + `${compatibilityTier ? ', adapter=compat-tier' : ''})`,
     );
     clearVwwStartupBreadcrumb({
       models: keywordConfigs.map((cfg) => cfg.name),
@@ -441,6 +444,75 @@ export class VwwBackend {
     }
 
     return this._processInferenceChunk(samples, rms);
+  }
+
+  /**
+   * Ingest one chunk's audio without running GPU inference - the
+   * backpressure path for stale chunks (see the worker's processChunk
+   * dispatch).  Keeps the energy-gate state machine and the inference
+   * feature window in sync so the next full inference operates on a
+   * gap-free, current window.
+   */
+  ingestChunk(samples) {
+    if (samples.length !== CHUNK_SAMPLES) {
+      throw new Error(`VWW chunk must be ${CHUNK_SAMPLES} samples, got ${samples.length}`);
+    }
+    if (typeof this._inference.ingestChunk !== 'function') {
+      // Embedding-arch inference has no ingest fast-path - process fully.
+      return this.processChunk(samples);
+    }
+    const rms = this._rms(samples);
+    this._latestRms = rms;
+
+    if (this._energyGateEnabled) {
+      if (this._sleeping) {
+        if (rms >= this._wakeRms) {
+          this._sleeping = false;
+          this._silentChunks = 0;
+          this._log?.log?.(
+            'wake-word',
+            `VWW wake - inference resumed (rms=${rms.toFixed(4)}, buffered=${this._sleepBufLen} chunks)`,
+          );
+        } else {
+          this._bufferSleepingChunk(samples);
+          this._latestScores = {};
+          return this._skippedResult(rms);
+        }
+      } else if (rms < this._wakeRms) {
+        this._silentChunks++;
+        if (this._silentChunks >= SLEEP_CHUNKS) {
+          this._sleeping = true;
+          this._resetStreamState();
+          this._log?.log?.('wake-word', `VWW sleep - inference paused (rms=${rms.toFixed(4)})`);
+        }
+      } else {
+        this._silentChunks = 0;
+      }
+      // Buffered sleep chunks must enter the window before this one so
+      // the audio stays ordered and gap-free.
+      if (this._sleepBufLen > 0) {
+        const replay = this._sleepBufferOrdered();
+        this._clearSleepBuffer();
+        for (const buffered of replay) this._inference.ingestChunk(buffered);
+      }
+    }
+
+    this._inference.ingestChunk(samples);
+    return this._skippedResult(rms);
+  }
+
+  _skippedResult(rms) {
+    return {
+      detected: false,
+      score: 0,
+      vadScore: 0,
+      model: null,
+      cutoff: 0,
+      rms,
+      triggerType: null,
+      skipped: true,
+      perModelScores: this._latestScores || {},
+    };
   }
 
   async _processInferenceChunk(samples, rms) {

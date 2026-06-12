@@ -37,6 +37,11 @@ let backend = null;
 // on MWW-only paths like dynamic stop-word loading.
 let engineKind = null;
 let currentSensitivityLabel = 'Moderately sensitive';
+// Chunks older than this when dequeued are "stale": the queue is backed
+// up behind a slow inference.  Just under two chunk periods (2 x 80 ms)
+// so normal postMessage jitter never triggers it.
+const STALE_CHUNK_MS = 150;
+let staleSkips = 0;
 // Per-instance microWakeWord runtime + model cache.  Only used when
 // engine === 'mww'.  We keep them on the worker scope so subsequent
 // keyword loads can reuse the same TFLite runtime.
@@ -110,7 +115,7 @@ async function init({
   energyGateEnabled,
   sensitivityLabel,
   enableTimings,
-  vwwGpuCompatibilityMode,
+  pipelineLog,
 }) {
   if (backend) {
     try { backend.destroy(); } catch (_) { /* ignore */ }
@@ -148,10 +153,7 @@ async function init({
       energyGateEnabled,
       sensitivityLabel,
       enableTimings === true,
-      {
-        gpuCompatibilityMode: vwwGpuCompatibilityMode === true,
-        pipelineLog: vwwGpuCompatibilityMode === true,
-      },
+      { pipelineLog: pipelineLog === true },
     );
     for (const name of models) {
       if (!active.has(name)) backend.removeKeyword(name);
@@ -222,8 +224,33 @@ async function dispatch(type, payload) {
   if (!backend) throw new Error(`${type}: backend not initialized`);
   switch (type) {
     case 'processChunk': {
-      // payload is a Float32Array (structured-cloned across the wire).
-      return backend.processChunk(payload);
+      // payload is { samples: Float32Array, t: epoch-ms } (older bundles
+      // sent the bare Float32Array - keep accepting it).
+      const samples = payload?.samples || payload;
+      const sentAt = typeof payload?.t === 'number' ? payload.t : null;
+      // Backpressure: when inference is slower than real time (>80 ms
+      // per chunk on compatibility-tier GPUs), chunks pile up in this
+      // worker's message queue and the audio window falls progressively
+      // behind the microphone - detections end up reacting to seconds-
+      // old speech.  Chunks that aged past the threshold in the queue
+      // get their audio ingested (ring + feature window stay gap-free)
+      // but skip the expensive GPU run, so the queue drains to real
+      // time and only fresh audio pays for inference.
+      if (
+        sentAt !== null
+        && typeof backend.ingestChunk === 'function'
+        && Date.now() - sentAt > STALE_CHUNK_MS
+      ) {
+        staleSkips++;
+        if (staleSkips === 1 || staleSkips % 250 === 0) {
+          workerLogger.log(
+            'wake-word',
+            `Backpressure: inference behind real time - ${staleSkips} stale chunk(s) ingested without GPU run`,
+          );
+        }
+        return backend.ingestChunk(samples);
+      }
+      return backend.processChunk(samples);
     }
     case 'addKeyword': {
       // The proxy strips non-clonable refs (the MWW runner) before
