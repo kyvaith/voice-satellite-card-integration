@@ -35,10 +35,12 @@ const CONV_WG_C = 1;
 
 /**
  * Each invocation of the NCHW conv computes this many adjacent outputs
- * along W with a vec4 accumulator.  The runner divides its X dispatch
- * by this factor.
+ * along W (vec4 accumulators) for this many output channels.  The
+ * runner divides its X dispatch by the W factor and its Z dispatch by
+ * the OC factor.
  */
 export const COMPAT_CONV_W_VECTOR = 4;
+export const COMPAT_CONV_OC_VECTOR = 4;
 
 const COMPAT_CONV_WG_W = 8;
 const COMPAT_CONV_WG_H = 8;
@@ -146,11 +148,13 @@ export function compatConv1dNcwShader() {
 }
 
 export function compatConv2dNchwShader() {
-  // Vectorized 4-wide along output W: each invocation produces four
-  // horizontally adjacent outputs.  Every weight is loaded once and
-  // reused across the four lanes (4x less weight traffic), and the
-  // multiply-accumulate runs as a vec4 fma - Mali-class GPUs execute
-  // scalar f32 MADs at a fraction of their SIMD width.
+  // Vectorized 4-wide along output W and 4-deep along output channels:
+  // each invocation produces a 4-output strip for four channels.  Each
+  // loaded input vec4 is reused across all four channels' weights -
+  // input loads are the dominant memory traffic of this kernel, and on
+  // Mali-class GPUs (no usable workgroup memory, L2-cached weights)
+  // register-level reuse like this measured ~1.4x where shared-memory
+  // tiling and f16 weights both measured slower.
   return /* wgsl */`
     struct ConvCompatParams {
       dims0: vec4<i32>,  // inC, inH, inW, outC
@@ -170,7 +174,7 @@ export function compatConv2dNchwShader() {
     fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let owBase: u32 = gid.x * ${COMPAT_CONV_W_VECTOR}u;
       let oh: u32 = gid.y;
-      let oc: u32 = gid.z;
+      let ocBase: u32 = gid.z * ${COMPAT_CONV_OC_VECTOR}u;
       let inC: u32 = u32(p.dims0.x);
       let inH: i32 = p.dims0.y;
       let inW: i32 = p.dims0.z;
@@ -179,20 +183,23 @@ export function compatConv2dNchwShader() {
       let outW: u32 = u32(p.dims1.y);
       let kH: u32 = u32(p.dims1.z);
       let kW: u32 = u32(p.dims1.w);
-      if (owBase >= outW || oh >= outH || oc >= outC) { return; }
+      if (owBase >= outW || oh >= outH || ocBase >= outC) { return; }
 
       let sW: i32 = p.steps0.y;
-      var acc: vec4<f32> = vec4<f32>(biasBuf[oc]);
+      var acc0: vec4<f32> = vec4<f32>(0.0);
+      var acc1: vec4<f32> = vec4<f32>(0.0);
+      var acc2: vec4<f32> = vec4<f32>(0.0);
+      var acc3: vec4<f32> = vec4<f32>(0.0);
       for (var ic: u32 = 0u; ic < inC; ic = ic + 1u) {
         let inIcBase: u32 = ic * u32(inH) * u32(inW);
-        let wIcBase: u32 = ((oc * inC + ic) * kH) * kW;
+        let wIcStride: u32 = inC * kH * kW;
+        let wBase0: u32 = ((ocBase * inC + ic) * kH) * kW;
         for (var kh: u32 = 0u; kh < kH; kh = kh + 1u) {
           let ih: i32 = i32(oh) * p.steps0.x + i32(kh) * p.steps0.z - p.pad0.x;
           if (ih < 0 || ih >= inH) { continue; }
           let rowBase: u32 = inIcBase + u32(ih) * u32(inW);
-          let wRowBase: u32 = wIcBase + kh * kW;
+          let wRowOff: u32 = kh * kW;
           for (var kw: u32 = 0u; kw < kW; kw = kw + 1u) {
-            let w: f32 = weightsBuf[wRowBase + kw];
             let x0: i32 = i32(owBase) * sW + i32(kw) * p.steps0.w - p.pad0.y;
             let x1: i32 = x0 + sW;
             let x2: i32 = x1 + sW;
@@ -202,15 +209,28 @@ export function compatConv2dNchwShader() {
             if (x1 >= 0 && x1 < inW) { v.y = inputBuf[rowBase + u32(x1)]; }
             if (x2 >= 0 && x2 < inW) { v.z = inputBuf[rowBase + u32(x2)]; }
             if (x3 >= 0 && x3 < inW) { v.w = inputBuf[rowBase + u32(x3)]; }
-            acc = fma(v, vec4<f32>(w), acc);
+            let wIdx: u32 = wBase0 + wRowOff + kw;
+            acc0 = fma(v, vec4<f32>(weightsBuf[wIdx]), acc0);
+            acc1 = fma(v, vec4<f32>(weightsBuf[wIdx + wIcStride]), acc1);
+            acc2 = fma(v, vec4<f32>(weightsBuf[wIdx + 2u * wIcStride]), acc2);
+            acc3 = fma(v, vec4<f32>(weightsBuf[wIdx + 3u * wIcStride]), acc3);
           }
         }
       }
-      let outRow: u32 = (oc * outH + oh) * outW;
-      outputBuf[outRow + owBase] = acc.x;
-      if (owBase + 1u < outW) { outputBuf[outRow + owBase + 1u] = acc.y; }
-      if (owBase + 2u < outW) { outputBuf[outRow + owBase + 2u] = acc.z; }
-      if (owBase + 3u < outW) { outputBuf[outRow + owBase + 3u] = acc.w; }
+      let strip0: u32 = (ocBase * outH + oh) * outW + owBase;
+      let stripStride: u32 = outH * outW;
+      let lanes: u32 = min(outW - owBase, ${COMPAT_CONV_W_VECTOR}u);
+      for (var j: u32 = 0u; j < ${COMPAT_CONV_OC_VECTOR}u; j = j + 1u) {
+        if (ocBase + j >= outC) { break; }
+        var a: vec4<f32>;
+        if (j == 0u) { a = acc0; } else if (j == 1u) { a = acc1; } else if (j == 2u) { a = acc2; } else { a = acc3; }
+        a = a + vec4<f32>(biasBuf[ocBase + j]);
+        let strip: u32 = strip0 + j * stripStride;
+        outputBuf[strip] = a.x;
+        if (lanes > 1u) { outputBuf[strip + 1u] = a.y; }
+        if (lanes > 2u) { outputBuf[strip + 2u] = a.z; }
+        if (lanes > 3u) { outputBuf[strip + 3u] = a.w; }
+      }
     }
   `;
 }

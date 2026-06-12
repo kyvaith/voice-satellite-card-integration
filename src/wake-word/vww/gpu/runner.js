@@ -34,6 +34,7 @@ import {
   CONV_DISPATCH_WORKGROUP,
   COMPAT_CONV_DISPATCH_WORKGROUP,
   COMPAT_CONV_W_VECTOR,
+  COMPAT_CONV_OC_VECTOR,
   compatConv2dNhwcShader,
   compatConv1dNcwShader,
   compatConv2dNchwShader,
@@ -529,10 +530,10 @@ export class GpuModelRunner {
         pads[0], pads[1], 0, 0,
       ]);
       // The vectorized NCHW shader covers COMPAT_CONV_W_VECTOR outputs
-      // along W per invocation.
+      // along W and COMPAT_CONV_OC_VECTOR output channels per invocation.
       dispatchX = Math.ceil(outMeta.shape[3] / (wg[0] * COMPAT_CONV_W_VECTOR));
       dispatchY = Math.ceil(outMeta.shape[2] / wg[1]);
-      dispatchZ = Math.ceil(outMeta.shape[1] / wg[2]);
+      dispatchZ = Math.ceil(outMeta.shape[1] / (wg[2] * COMPAT_CONV_OC_VECTOR));
     }
     const pipeline = await this._createComputePipeline(wgsl, 'conv.onnx');
     const inputBuf = this._bufferFor(op.inputs[0]);
