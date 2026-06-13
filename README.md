@@ -165,7 +165,7 @@ See the [Troubleshooting reference](docs/troubleshooting.md) for the most common
 
 ## Contributing
 
-Contributions are welcome. Please feel free to submit issues or pull requests.
+Contributions are welcome. Please feel free to submit issues. Pull requests are currently not being accepted.
 
 ## License
 
