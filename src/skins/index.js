@@ -9,6 +9,7 @@ import { defaultSkin } from './default.js';
 import { alexaSkin } from './alexa.js';
 import { googleHomeSkin } from './google-home.js';
 import { homeAssistantSkin } from './home-assistant.js';
+import { ensureInkBlobsSkinRuntime, inkBlobsSkin } from './ink-blobs.js';
 import { ensureLensFlaresSkinRuntime, lensFlaresSkin } from './lens-flares.js';
 import { retroTerminalSkin } from './retro-terminal.js';
 import { siriSkin } from './siri.js';
@@ -20,6 +21,7 @@ const SKIN_META = [
   { value: 'alexa', label: 'Alexa' },
   { value: 'google-home', label: 'Google Home' },
   { value: 'home-assistant', label: 'Home Assistant' },
+  { value: 'ink-blobs', label: 'Ink Blobs' },
   { value: 'lens-flares', label: 'Lens Flares' },
   { value: 'retro-terminal', label: 'Retro Terminal' },
   { value: 'siri', label: 'Siri' },
@@ -31,6 +33,7 @@ const SKINS = {
   alexa: alexaSkin,
   'google-home': googleHomeSkin,
   'home-assistant': homeAssistantSkin,
+  'ink-blobs': inkBlobsSkin,
   'lens-flares': lensFlaresSkin,
   'retro-terminal': retroTerminalSkin,
   siri: siriSkin,
@@ -38,6 +41,7 @@ const SKINS = {
 };
 
 const SKIN_ACTIVATORS = {
+  'ink-blobs': ensureInkBlobsSkinRuntime,
   'lens-flares': ensureLensFlaresSkinRuntime,
   waveform: ensureWaveformSkinRuntime,
 };

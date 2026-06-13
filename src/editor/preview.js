@@ -10,6 +10,7 @@ import { getSkin, loadSkin } from '../skins/index.js';
 import baseCSS from './preview.css';
 import { t } from '../i18n/index.js';
 import waveformPreviewCSS from '../skins/waveform-preview.css';
+import inkBlobsPreviewCSS from '../skins/ink-blobs-preview.css';
 import lensFlaresPreviewCSS from '../skins/lens-flares-preview.css';
 
 const PREVIEW_ONLY_SKINS = {
@@ -18,6 +19,14 @@ const PREVIEW_ONLY_SKINS = {
     previewCSS: waveformPreviewCSS,
     overlayColor: null,
     defaultOpacity: 0.90,
+  },
+  'ink-blobs': {
+    id: 'ink-blobs',
+    previewCSS: inkBlobsPreviewCSS,
+    overlayColor: [244, 246, 250],
+    darkOverlayColor: [0, 0, 0],
+    defaultOpacity: 1,
+    darkDefaultOpacity: 1,
   },
   'lens-flares': {
     id: 'lens-flares',
@@ -144,6 +153,64 @@ function buildWaveformSVG() {
     ${renderParticles(darkStrands, 'preview-waveform-dark', 25)}
     ${renderGroup(lightStrands, 'preview-waveform-light')}
     ${renderParticles(lightStrands, 'preview-waveform-light', 25)}
+  </svg>`;
+}
+
+/**
+ * Build an inline SVG that approximates the live ink look statically: colored
+ * radial drops are warped by an `feTurbulence` + `feDisplacementMap` pass, so
+ * their edges break into the same fractal ink filaments the shader produces.
+ * One copy per theme, toggled by CSS. Positions are seeded for stability.
+ */
+function buildInkBlobsSVG() {
+  const W = 600, H = 400;
+  let seed = 23;
+  function rand() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+
+  const darkInk = ['255,26,26', '255,209,13', '31,102,255', '26,235,64', '224,230,240'];
+  const lightInk = ['217,10,10', '245,184,0', '10,36,217', '0,140,31', '10,13,18'];
+
+  // Horizontal streams entering from the left and right edges (matching the
+  // live side-injection), warped by turbulence into ink filaments.
+  const drops = [
+    { cx: 0.26 * W, cy: 0.40 * H, rx: 155, ry: 52, idx: 0 },
+    { cx: 0.32 * W, cy: 0.64 * H, rx: 130, ry: 46, idx: 1 },
+    { cx: 0.74 * W, cy: 0.38 * H, rx: 155, ry: 52, idx: 2 },
+    { cx: 0.68 * W, cy: 0.62 * H, rx: 130, ry: 46, idx: 3 },
+  ].map((d) => ({ ...d, a: 0.7 + rand() * 0.25 }));
+
+  function renderGroup(palette, cls) {
+    let defs = '';
+    let circles = '';
+    drops.forEach((d, i) => {
+      const id = `${cls}-${i}`;
+      const col = palette[d.idx];
+      defs += `<radialGradient id="${id}">
+        <stop offset="0%" stop-color="rgba(${col},${d.a.toFixed(2)})"/>
+        <stop offset="55%" stop-color="rgba(${col},${(d.a * 0.6).toFixed(2)})"/>
+        <stop offset="100%" stop-color="rgba(${col},0)"/>
+      </radialGradient>`;
+      circles += `<ellipse cx="${d.cx.toFixed(1)}" cy="${d.cy.toFixed(1)}" rx="${d.rx.toFixed(1)}" ry="${d.ry.toFixed(1)}" fill="url(#${id})"/>`;
+    });
+    // Warp filter gives the inky filament edges; seed differs per theme.
+    const fid = `ink-warp-${cls}`;
+    const fseed = cls.endsWith('dark') ? 7 : 19;
+    return `<g class="${cls}">
+      <defs>
+        ${defs}
+        <filter id="${fid}" x="-25%" y="-25%" width="150%" height="150%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.011 0.015" numOctaves="5" seed="${fseed}" result="n"/>
+          <feDisplacementMap in="SourceGraphic" in2="n" scale="78" xChannelSelector="R" yChannelSelector="G"/>
+          <feGaussianBlur stdDeviation="1.1"/>
+        </filter>
+      </defs>
+      <g filter="url(#${fid})">${circles}</g>
+    </g>`;
+  }
+
+  return `<svg class="preview-inkblobs-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+    ${renderGroup(darkInk, 'preview-inkblobs-dark')}
+    ${renderGroup(lightInk, 'preview-inkblobs-light')}
   </svg>`;
 }
 
@@ -312,6 +379,7 @@ export function renderPreview(shadowRoot, config) {
       <div class="preview-label">${tt('editor.preview.label', 'Preview')}</div>
       <div class="preview-blur" style="${overlayStyle}"></div>
       ${skinId === 'waveform' ? `<div class="preview-waveform">${buildWaveformSVG()}</div>` : ''}
+      ${skinId === 'ink-blobs' ? `<div class="preview-inkblobs">${buildInkBlobsSVG()}</div>` : ''}
       ${skinId === 'lens-flares' ? `<div class="preview-lens-flares">${buildLensFlaresSVG()}</div>` : ''}
       <div class="preview-bar${config.reactive_bar !== false ? ' reactive' : ''}"></div>
       <div class="preview-chat">
@@ -326,6 +394,7 @@ export function renderPreview(shadowRoot, config) {
         </div>
       </div>
       ${skinId === 'waveform' ? `<div class="preview-notice">${tt('editor.preview.waveform_notice', 'This skin is GPU-intensive. Not recommended for low-end devices.')}</div>` : ''}
+      ${skinId === 'ink-blobs' ? `<div class="preview-notice">${tt('editor.preview.inkblobs_notice', 'This skin is GPU-intensive. Not recommended for low-end devices.')}</div>` : ''}
     </div>
   `;
 }

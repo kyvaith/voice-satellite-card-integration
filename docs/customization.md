@@ -8,6 +8,7 @@ Theming the overlay (skins, custom CSS) and replacing the built-in chime sounds.
   - [Built-in Skins](#built-in-skins)
   - [Custom CSS](#custom-css)
   - [Waveform Skin CSS Variables](#waveform-skin-css-variables)
+  - [Ink Blobs Skin CSS Variables](#ink-blobs-skin-css-variables)
   - [Lens Flares Skin CSS Variables](#lens-flares-skin-css-variables)
 - [Custom Sounds](#custom-sounds)
 
@@ -25,6 +26,7 @@ Voice Satellite includes a skin system that themes the entire overlay UI - activ
 | **Alexa** | Cyan glow bar, dark overlay, centered bold text, Echo-inspired design |
 | **Google Home** | Four-color Google gradient bar, left-aligned text, Nest-inspired design. Supports light and dark mode which automatically follows your HA theme or can be forced via the Theme Mode setting |
 | **Home Assistant** | Matches your HA theme natively in both light and dark mode. All colors derived from your theme's primary color and card background via CSS custom properties - automatically adapts to any HA theme. Monochromatic four-tone activity bar with flowing gradient animation |
+| **Ink Blobs** | Colored ink (red, yellow, blue, green, plus black on light / light grey on dark) injected as jets from the sides of a full-screen water surface and carried into swirling, billowing plumes by a real-time GPU fluid simulation (adapted from [PavelDoGreat/WebGL-Fluid-Simulation](https://github.com/PavelDoGreat/WebGL-Fluid-Simulation), MIT). Audio level drives how often new ink is injected and how forcefully it shoots in, so the water churns while listening or speaking and settles into a calm drift otherwise. Automatically adapts to light and dark modes based on your Home Assistant theme settings. **GPU-intensive! Not recommended for low-end devices** |
 | **Lens Flares** | Anamorphic vertical light streaks in cool blues with warm pink/red accents and scattered bokeh dots, all behind a heavy multi-pass bloom. Audio level pulses the brightness of the flares; a slow horizontal drift keeps the scene alive at idle. Edge falloff dims flares on the left and right where text sits, keeping the middle bright. Dark-only by design |
 | **Retro Terminal** | Green phosphor CRT aesthetic with scanlines, bezel frame, monospace font, and screen-edge glow |
 | **Siri** | Full-screen gradient border glow (purple -> blue -> teal -> pink), dark frosted overlay, centered clean text, Apple-inspired design |
@@ -104,6 +106,43 @@ The Waveform skin exposes CSS variables for full color customization of strands,
   --wf-strand-5: #555555;
   --wf-strand-6: #333333;
   --wf-strand-7: #1a1a1a;
+}
+```
+
+</details>
+
+### Ink Blobs Skin CSS Variables
+
+The Ink Blobs skin exposes CSS variables for the ink colors, background, and UI chrome. Override them in the **Custom CSS** field. Dark and light themes have independent variables - set them separately to customize each mode. The five `--ib-ink-N` colors set the ink injected from the sides; changes apply to newly injected ink without a reload.
+
+<details>
+<summary><strong>Available variables</strong></summary>
+
+| Variable | Description |
+|----------|-------------|
+| `--ib-overlay` | Full-screen water surface behind the ink |
+| `--ib-surface` | Background of elevated UI elements (panels, timers) |
+| `--ib-surface-glass` | Transparent panel background over the ink |
+| `--ib-text` | Primary text color |
+| `--ib-text-dim` | Secondary/dimmed text color |
+| `--ib-text-muted` | Muted text color |
+| `--ib-accent` | Accent color (start button, progress bars, highlights) |
+| `--ib-progress` | Timer pill progress bar fill |
+| `--ib-ink-1` through `--ib-ink-5` | The five ink colors (default: red, yellow, blue, green, and black on light / light grey on dark) |
+
+</details>
+
+<details>
+<summary><strong>Example: custom ink colors</strong></summary>
+
+```css
+/* Teal / orange / violet / pink / white ink, dark */
+#voice-satellite-ui.vs-dark {
+  --ib-ink-1: #14dccd;
+  --ib-ink-2: #ff9646;
+  --ib-ink-3: #965aff;
+  --ib-ink-4: #ff5a9a;
+  --ib-ink-5: #e6e8ee;
 }
 ```
 
