@@ -123,6 +123,9 @@ function formatRuntimeStatus(status, triggerType = null) {
   if (Number.isInteger(status.matchedTargetIndex) && status.matchedTargetIndex >= 0) {
     parts.push(`runtime_target=${status.matchedTargetIndex + 1}`);
   }
+  if (Number.isInteger(status.matchedTargetGroupIndex) && status.matchedTargetGroupIndex >= 0) {
+    parts.push(`runtime_group=${status.matchedTargetGroupIndex + 1}`);
+  }
   if (typeof status.highConfidenceBypass === 'number' && Number.isFinite(status.highConfidenceBypass)) {
     parts.push(`runtime_bypass=${status.highConfidenceBypass.toFixed(2)}`);
   }
@@ -134,6 +137,7 @@ function formatRuntimeStatus(status, triggerType = null) {
     parts.push(`runtime_bypass_hits=${status.hits}/${status.highConfidenceBypassMinHits}`);
   }
   if (status.bypassed === true) parts.push('runtime_bypassed=true');
+  if (status.grouped === true) parts.push('runtime_grouped=true');
   return parts.join(' ');
 }
 
@@ -169,7 +173,7 @@ export class VwwBackend {
     this._runtimeStatus = {};
     for (const name of this._keywordNames) {
       this._runtimeMode[name] = runtimeModeFromManifest(runtime?.[name]);
-      this._hitCounters[name] = { hits: 0, targetIndex: -1 };
+      this._hitCounters[name] = this._makeHitCounter();
       this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false);
     }
 
@@ -329,6 +333,17 @@ export class VwwBackend {
     return new VwwBackend(inference, log, cutoffs, energyGateEnabled, sensitivityLabel, enableTimings, runtime, stopClassifiers);
   }
 
+  _makeHitCounter() {
+    return {
+      hits: 0,
+      targetIndex: -1,
+      targetGroupIndex: -1,
+      grouped: false,
+      requiredHits: null,
+      bypassMinHits: null,
+    };
+  }
+
   _makeWindow() {
     return {
       pendingConfirm: false,
@@ -379,7 +394,7 @@ export class VwwBackend {
     // wake / playback resume) so partial hit-counts before the pause
     // don't combine with frames after the pause to early-trigger.
     for (const name of this._keywordNames) {
-      this._hitCounters[name] = 0;
+      this._hitCounters[name] = this._makeHitCounter();
       this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false);
     }
   }
@@ -727,12 +742,41 @@ export class VwwBackend {
     const matchedTargetIndex = Number.isInteger(ctcInfo?.matchedTargetIndex)
       ? ctcInfo.matchedTargetIndex
       : -1;
-    const requiredHits = requiredHitsForTarget(mode, matchedTargetIndex);
-    const bypassMinHits = bypassMinHitsForTarget(mode, matchedTargetIndex, requiredHits);
+    const matchedTargetGroupIndex = Number.isInteger(ctcInfo?.matchedTargetGroupIndex)
+      ? ctcInfo.matchedTargetGroupIndex
+      : matchedTargetIndex;
+    const baseRequiredHits = requiredHitsForTarget(mode, matchedTargetIndex);
+    const baseBypassMinHits = bypassMinHitsForTarget(mode, matchedTargetIndex, baseRequiredHits);
     if (score > cutoff) {
-      const prev = this._hitCounters[name] || { hits: 0, targetIndex: -1 };
-      const nextHits = prev.targetIndex === matchedTargetIndex ? prev.hits + 1 : 1;
-      this._hitCounters[name] = { hits: nextHits, targetIndex: matchedTargetIndex };
+      const prev = this._hitCounters[name] || this._makeHitCounter();
+      const sameGroup = (
+        Number.isInteger(matchedTargetGroupIndex)
+        && matchedTargetGroupIndex >= 0
+        && prev.targetGroupIndex === matchedTargetGroupIndex
+      );
+      const requiredHits = sameGroup && Number.isFinite(prev.requiredHits)
+        ? Math.max(baseRequiredHits, prev.requiredHits)
+        : baseRequiredHits;
+      const bypassMinHits = sameGroup && Number.isFinite(prev.bypassMinHits)
+        ? Math.max(baseBypassMinHits, prev.bypassMinHits)
+        : baseBypassMinHits;
+      const grouped = !!(
+        sameGroup
+        && Number.isInteger(prev.targetIndex)
+        && prev.targetIndex >= 0
+        && Number.isInteger(matchedTargetIndex)
+        && matchedTargetIndex >= 0
+        && prev.targetIndex !== matchedTargetIndex
+      ) || (sameGroup && prev.grouped === true);
+      const nextHits = sameGroup ? prev.hits + 1 : 1;
+      this._hitCounters[name] = {
+        hits: nextHits,
+        targetIndex: matchedTargetIndex,
+        targetGroupIndex: matchedTargetGroupIndex,
+        grouped,
+        requiredHits,
+        bypassMinHits,
+      };
       const bypass = mode?.highConfidenceBypass;
       const isHighConfidence = (
         typeof bypass === 'number'
@@ -741,24 +785,24 @@ export class VwwBackend {
         && ctcInfo.matchedConfidence >= bypass
       );
       if (isHighConfidence && nextHits >= bypassMinHits) {
-        this._runtimeStatus[name] = this._makeRuntimeStatus(name, nextHits, true, true, requiredHits, matchedTargetIndex, bypassMinHits);
-        this._hitCounters[name] = { hits: 0, targetIndex: -1 };
+        this._runtimeStatus[name] = this._makeRuntimeStatus(name, nextHits, true, true, requiredHits, matchedTargetIndex, bypassMinHits, matchedTargetGroupIndex, grouped);
+        this._hitCounters[name] = this._makeHitCounter();
         return 'bypass';
       }
       if (nextHits >= requiredHits) {
-        this._runtimeStatus[name] = this._makeRuntimeStatus(name, requiredHits, false, isHighConfidence, requiredHits, matchedTargetIndex, bypassMinHits);
-        this._hitCounters[name] = { hits: 0, targetIndex: -1 };
+        this._runtimeStatus[name] = this._makeRuntimeStatus(name, requiredHits, false, isHighConfidence, requiredHits, matchedTargetIndex, bypassMinHits, matchedTargetGroupIndex, grouped);
+        this._hitCounters[name] = this._makeHitCounter();
         return 'counter';
       }
-      this._runtimeStatus[name] = this._makeRuntimeStatus(name, nextHits, false, isHighConfidence, requiredHits, matchedTargetIndex, bypassMinHits);
+      this._runtimeStatus[name] = this._makeRuntimeStatus(name, nextHits, false, isHighConfidence, requiredHits, matchedTargetIndex, bypassMinHits, matchedTargetGroupIndex, grouped);
     } else {
-      this._hitCounters[name] = { hits: 0, targetIndex: -1 };
-      this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false, false, requiredHits, matchedTargetIndex, bypassMinHits);
+      this._hitCounters[name] = this._makeHitCounter();
+      this._runtimeStatus[name] = this._makeRuntimeStatus(name, 0, false, false, baseRequiredHits, matchedTargetIndex, baseBypassMinHits, matchedTargetGroupIndex, false);
     }
     return null;
   }
 
-  _makeRuntimeStatus(name, hits = 0, bypassed = false, highConfidence = false, requiredHits = null, matchedTargetIndex = -1, bypassMinHits = null) {
+  _makeRuntimeStatus(name, hits = 0, bypassed = false, highConfidence = false, requiredHits = null, matchedTargetIndex = -1, bypassMinHits = null, matchedTargetGroupIndex = -1, grouped = false) {
     const mode = this._runtimeMode[name] || { mode: 'borderline', cooldownMs: COOLDOWN_MS };
     if (mode.mode !== 'counter') {
       return { mode: 'borderline', cooldownMs: mode.cooldownMs };
@@ -770,6 +814,8 @@ export class VwwBackend {
       requiredHits: Number.isFinite(requiredHits) ? requiredHits : mode.requiredHits,
       baseRequiredHits: mode.requiredHits,
       matchedTargetIndex,
+      matchedTargetGroupIndex,
+      grouped,
       highConfidenceBypass: mode.highConfidenceBypass,
       highConfidenceBypassMinHits: Number.isFinite(bypassMinHits)
         ? bypassMinHits
@@ -910,7 +956,7 @@ export class VwwBackend {
       // later via enableStopModel / panel slot 2 changes.
       const r = entry.manifest?.runtime;
       this._runtimeMode[cfg.name] = runtimeModeFromManifest(r);
-      this._hitCounters[cfg.name] = 0;
+      this._hitCounters[cfg.name] = this._makeHitCounter();
       this._runtimeStatus[cfg.name] = this._makeRuntimeStatus(cfg.name, 0, false);
       this._keywordNames.push(cfg.name);
       // Pick up the manifest's stop_classifier flag so a lazy-loaded

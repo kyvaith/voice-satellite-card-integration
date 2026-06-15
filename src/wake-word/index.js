@@ -67,6 +67,9 @@ function formatWakeRuntimeStatus(result) {
   if (Number.isInteger(status.matchedTargetIndex) && status.matchedTargetIndex >= 0) {
     bits.push(`runtime_target=${status.matchedTargetIndex + 1}`);
   }
+  if (Number.isInteger(status.matchedTargetGroupIndex) && status.matchedTargetGroupIndex >= 0) {
+    bits.push(`runtime_group=${status.matchedTargetGroupIndex + 1}`);
+  }
   if (typeof status.highConfidenceBypass === 'number' && Number.isFinite(status.highConfidenceBypass)) {
     bits.push(`runtime_bypass=${status.highConfidenceBypass.toFixed(2)}`);
   }
@@ -78,6 +81,7 @@ function formatWakeRuntimeStatus(result) {
     bits.push(`runtime_bypass_hits=${status.hits}/${status.highConfidenceBypassMinHits}`);
   }
   if (status.bypassed === true) bits.push('runtime_bypassed=true');
+  if (status.grouped === true) bits.push('runtime_grouped=true');
   return bits;
 }
 

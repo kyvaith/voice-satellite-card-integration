@@ -1087,6 +1087,7 @@ export class WakeWordTestSession {
     const anchors = Array.isArray(ctc.wake_word_target_anchors)
       ? ctc.wake_word_target_anchors
       : [];
+    const targetGroups = this._targetGroupIds(ctc);
     for (let i = 0; i < targetCount; i++) {
       const hits = Number.isFinite(targetHits[i])
         ? targetHits[i]
@@ -1094,9 +1095,12 @@ export class WakeWordTestSession {
       const anchorList = Array.isArray(anchors[i]) && anchors[i].length
         ? ` anchors=${anchors[i].join(',')}`
         : '';
+      const group = Number.isInteger(targetGroups[i])
+        ? ` group=${targetGroups[i] + 1}`
+        : '';
       this._emitLog(
         'info',
-        `CTC target [${i + 1}]${hits ? ` hits=${hits}` : ''}${anchorList}: `
+        `CTC target [${i + 1}]${group}${hits ? ` hits=${hits}` : ''}${anchorList}: `
         + this._formatCtcTarget(ctc, i),
       );
     }
@@ -1109,6 +1113,35 @@ export class WakeWordTestSession {
       const n = Number(value);
       return Number.isFinite(n) && n > 0 ? Math.max(1, Math.floor(n)) : null;
     });
+  }
+
+  _targetGroupIds(ctc) {
+    const targets = Array.isArray(ctc?.wake_word_targets)
+      ? ctc.wake_word_targets
+      : [];
+    const raw = ctc?.wake_word_target_groups;
+    const wordSepId = ctc?.word_sep_id ?? 2;
+    const ids = [];
+    const labelToId = new Map();
+    const idForLabel = (label) => {
+      const key = String(label);
+      if (!labelToId.has(key)) labelToId.set(key, labelToId.size);
+      return labelToId.get(key);
+    };
+    if (Array.isArray(raw) && raw.length >= targets.length) {
+      for (let i = 0; i < targets.length; i++) {
+        const value = raw[i];
+        ids[i] = value == null ? i : idForLabel(value);
+      }
+      return ids;
+    }
+    for (let i = 0; i < targets.length; i++) {
+      const normalized = (targets[i] || [])
+        .filter((id) => id !== wordSepId)
+        .join(',');
+      ids[i] = idForLabel(normalized || `target:${i}`);
+    }
+    return ids;
   }
 
   _formatCtcTarget(ctc, index) {
@@ -1133,7 +1166,12 @@ export class WakeWordTestSession {
     const idx = Number.isInteger(ctcInfo?.matchedTargetIndex)
       ? ctcInfo.matchedTargetIndex
       : -1;
-    return idx >= 0 ? ` target=${idx + 1}` : '';
+    const groupIdx = Number.isInteger(ctcInfo?.matchedTargetGroupIndex)
+      ? ctcInfo.matchedTargetGroupIndex
+      : -1;
+    const target = idx >= 0 ? ` target=${idx + 1}` : '';
+    const group = groupIdx >= 0 ? ` group=${groupIdx + 1}` : '';
+    return `${target}${group}`;
   }
 
   _formatVwwRuntimeInfo(result, model, triggerType = null) {
@@ -1147,6 +1185,9 @@ export class WakeWordTestSession {
     if (Number.isInteger(info.matchedTargetIndex) && info.matchedTargetIndex >= 0) {
       parts.push(`runtime_target=${info.matchedTargetIndex + 1}`);
     }
+    if (Number.isInteger(info.matchedTargetGroupIndex) && info.matchedTargetGroupIndex >= 0) {
+      parts.push(`runtime_group=${info.matchedTargetGroupIndex + 1}`);
+    }
     if (typeof info.highConfidenceBypass === 'number' && Number.isFinite(info.highConfidenceBypass)) {
       parts.push(`runtime_bypass=${info.highConfidenceBypass.toFixed(2)}`);
     }
@@ -1158,6 +1199,7 @@ export class WakeWordTestSession {
       parts.push(`runtime_bypass_hits=${info.hits}/${info.highConfidenceBypassMinHits}`);
     }
     if (info.bypassed === true) parts.push('runtime_bypassed=true');
+    if (info.grouped === true) parts.push('runtime_grouped=true');
     return parts.join(' ');
   }
 

@@ -77,6 +77,9 @@ export class CtcDecoder {
       return Array.isArray(a) ? a.slice().sort((x, y) => x - y) : [];
     });
     this.anyAnchors = this.targetAnchors.some((a) => a.length > 0);
+    const groups = buildTargetGroupIds(ctcConfig, this.targets, this.wordSepId);
+    this.targetGroupIds = groups.ids;
+    this.targetGroupSizes = groups.sizes;
     this.inventory = ctcConfig.inventory || null;
     // T_out from output shape: shape is (B, T_out, V).  We only ever
     // run B=1 inference, so dims are [1, T_out, V].
@@ -177,7 +180,14 @@ export class CtcDecoder {
    * matched canonical [o ʊ k e ɪ _ n ɑ ː b u ː] at ed=1 and fired.
    */
   acceptedMatch(decoded, confidence) {
-    const miss = { matched: false, targetIndex: -1, editDistance: Infinity, confidence: 0 };
+    const miss = {
+      matched: false,
+      targetIndex: -1,
+      targetGroupIndex: -1,
+      targetGroupSize: 1,
+      editDistance: Infinity,
+      confidence: 0,
+    };
     if (!decoded.length) return miss;
     const trailTol = this.trailTolerance;
     const hay = Uint8Array.from(decoded);
@@ -214,6 +224,8 @@ export class CtcDecoder {
             return {
               matched: true,
               targetIndex: ti,
+              targetGroupIndex: this.targetGroupIds[ti] ?? ti,
+              targetGroupSize: this.targetGroupSizes[this.targetGroupIds[ti] ?? ti] ?? 1,
               editDistance: 0,
               confidence: meanConf(idx, t.length),
             };
@@ -255,6 +267,8 @@ export class CtcDecoder {
             return {
               matched: true,
               targetIndex: ti,
+              targetGroupIndex: this.targetGroupIds[ti] ?? ti,
+              targetGroupSize: this.targetGroupSizes[this.targetGroupIds[ti] ?? ti] ?? 1,
               editDistance: ed,
               confidence: meanConf(i, winLen),
             };
@@ -316,6 +330,8 @@ export class CtcDecoder {
       totalConfidence: 0,
       gateThreshold: this.minMatchedConfidence,
       matchedTargetIndex: -1,
+      matchedTargetGroupIndex: -1,
+      matchedTargetGroupSize: 1,
     };
     if (ids.length === 0) {
       return out;
@@ -374,6 +390,8 @@ export class CtcDecoder {
     const accepted = this.acceptedMatch(ids, confidence);
     out.matched = accepted.matched;
     out.matchedTargetIndex = accepted.targetIndex;
+    out.matchedTargetGroupIndex = accepted.targetGroupIndex ?? -1;
+    out.matchedTargetGroupSize = accepted.targetGroupSize ?? 1;
     if (accepted.matched) {
       out.minEditDistance = accepted.editDistance;
       out.matchedConfidence = accepted.confidence;
@@ -421,6 +439,36 @@ export class CtcDecoder {
       return this.inventory[i] ?? `?${i}`;
     });
   }
+}
+
+
+function buildTargetGroupIds(ctcConfig, targets, wordSepId) {
+  const raw = ctcConfig?.wake_word_target_groups;
+  const ids = [];
+  const labelToId = new Map();
+  const idForLabel = (label) => {
+    const key = String(label);
+    if (!labelToId.has(key)) labelToId.set(key, labelToId.size);
+    return labelToId.get(key);
+  };
+
+  if (Array.isArray(raw) && raw.length >= targets.length) {
+    for (let i = 0; i < targets.length; i++) {
+      const value = raw[i];
+      ids[i] = value == null ? i : idForLabel(value);
+    }
+  } else {
+    for (let i = 0; i < targets.length; i++) {
+      const normalized = (targets[i] || [])
+        .filter((id) => id !== wordSepId)
+        .join(',');
+      ids[i] = idForLabel(normalized || `target:${i}`);
+    }
+  }
+
+  const sizes = [];
+  for (const id of ids) sizes[id] = (sizes[id] || 0) + 1;
+  return { ids, sizes };
 }
 
 

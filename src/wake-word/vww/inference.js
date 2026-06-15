@@ -173,6 +173,8 @@ export class VwwInference {
           minEditDistance: info.minEditDistance,
           matched: info.matched,
           matchedTargetIndex: info.matchedTargetIndex,
+          matchedTargetGroupIndex: info.matchedTargetGroupIndex,
+          matchedTargetGroupSize: info.matchedTargetGroupSize,
           matchedConfidence: info.matchedConfidence,
           totalConfidence: info.totalConfidence,
           gateThreshold: info.gateThreshold,
