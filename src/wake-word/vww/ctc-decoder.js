@@ -62,6 +62,17 @@ export class CtcDecoder {
       ? Number(ctcConfig.min_matched_confidence)
       : -Infinity;
     this.targets = (ctcConfig.wake_word_targets || []).map((t) => t.slice());
+    const targetMinConf = Array.isArray(ctcConfig.target_min_matched_confidence)
+      ? ctcConfig.target_min_matched_confidence
+      : [];
+    this.targetMinMatchedConfidence = this.targets.map((_, ti) => {
+      const value = Number(targetMinConf[ti]);
+      return Number.isFinite(value) ? value : this.minMatchedConfidence;
+    });
+    this.hasConfidenceGate = (
+      Number.isFinite(this.minMatchedConfidence)
+      || this.targetMinMatchedConfidence.some((value) => Number.isFinite(value))
+    );
     this.targetBytes = this.targets.map((t) => Uint8Array.from(t));
     // Per-target anchor positions.  Listed positions MUST appear in the
     // decoded window with the same phoneme (no substitution/insertion/
@@ -195,11 +206,7 @@ export class CtcDecoder {
       confidence != null
       && confidence.length === decoded.length
     );
-    const gateActive = (
-      hasConfidence
-      && Number.isFinite(this.minMatchedConfidence)
-    );
-    const minConf = this.minMatchedConfidence;
+    const minConfForTarget = (ti) => this.targetMinMatchedConfidence[ti] ?? this.minMatchedConfidence;
     // Helper: mean confidence over window [start, start+len)
     const meanConf = (start, len) => {
       if (!hasConfidence) return 0;
@@ -207,7 +214,10 @@ export class CtcDecoder {
       for (let k = 0; k < len; k++) sum += confidence[start + k];
       return sum / len;
     };
-    const confOk = (start, len) => !gateActive || meanConf(start, len) >= minConf;
+    const confOk = (ti, start, len) => {
+      const minConf = minConfForTarget(ti);
+      return !hasConfidence || !Number.isFinite(minConf) || meanConf(start, len) >= minConf;
+    };
     // Exact-substring fast path.  When trailTol or confidence gate is
     // active, we need to know the match location, so loop occurrences.
     for (let ti = 0; ti < this.targetBytes.length; ti++) {
@@ -220,7 +230,7 @@ export class CtcDecoder {
         }
         if (match) {
           const trailing = hay.length - (idx + t.length);
-          if ((trailTol < 0 || trailing <= trailTol) && confOk(idx, t.length)) {
+          if ((trailTol < 0 || trailing <= trailTol) && confOk(ti, idx, t.length)) {
             return {
               matched: true,
               targetIndex: ti,
@@ -228,6 +238,7 @@ export class CtcDecoder {
               targetGroupSize: this.targetGroupSizes[this.targetGroupIds[ti] ?? ti] ?? 1,
               editDistance: 0,
               confidence: meanConf(idx, t.length),
+              gateThreshold: minConfForTarget(ti),
             };
           }
         }
@@ -263,7 +274,7 @@ export class CtcDecoder {
           const ed = useAnchors
             ? editDistanceAnchored(decoded, i, winLen, target, anchors, ws)
             : editDistance(decoded, i, winLen, target, ws);
-          if (ed <= max && confOk(i, winLen)) {
+          if (ed <= max && confOk(ti, i, winLen)) {
             return {
               matched: true,
               targetIndex: ti,
@@ -271,6 +282,7 @@ export class CtcDecoder {
               targetGroupSize: this.targetGroupSizes[this.targetGroupIds[ti] ?? ti] ?? 1,
               editDistance: ed,
               confidence: meanConf(i, winLen),
+              gateThreshold: minConfForTarget(ti),
             };
           }
         }
@@ -293,7 +305,7 @@ export class CtcDecoder {
     // configured so matches() can apply the threshold.  When the gate
     // is disabled (default for old models), fall back to the cheap
     // greedy decode that skips per-frame confidence accounting.
-    if (Number.isFinite(this.minMatchedConfidence)) {
+    if (this.hasConfidenceGate) {
       const { ids, confidence } = this.greedyDecodeWithConfidence(flatLogProbs);
       return this.matches(ids, confidence) ? 1.0 : 0.0;
     }
@@ -352,6 +364,7 @@ export class CtcDecoder {
     let bestEd = Infinity;
     let bestStart = -1;
     let bestLen = 0;
+    let bestTargetIndex = -1;
     for (let ti = 0; ti < this.targets.length; ti++) {
       const target = this.targets[ti];
       const anchors = this.targetAnchors[ti];
@@ -373,6 +386,7 @@ export class CtcDecoder {
             bestEd = ed;
             bestStart = i;
             bestLen = winLen;
+            bestTargetIndex = ti;
             if (bestEd === 0) break;
           }
         }
@@ -385,6 +399,7 @@ export class CtcDecoder {
       let sum = 0;
       for (let k = 0; k < bestLen; k++) sum += confidence[bestStart + k];
       out.matchedConfidence = sum / bestLen;
+      out.gateThreshold = this.targetMinMatchedConfidence[bestTargetIndex] ?? this.minMatchedConfidence;
     }
     // Final matcher decision (applies confidence gate if configured)
     const accepted = this.acceptedMatch(ids, confidence);
@@ -395,6 +410,7 @@ export class CtcDecoder {
     if (accepted.matched) {
       out.minEditDistance = accepted.editDistance;
       out.matchedConfidence = accepted.confidence;
+      out.gateThreshold = accepted.gateThreshold ?? this.minMatchedConfidence;
     }
     return out;
   }

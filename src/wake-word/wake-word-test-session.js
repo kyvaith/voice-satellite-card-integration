@@ -1064,6 +1064,10 @@ export class WakeWordTestSession {
     const minConf = Number.isFinite(Number(ctc.min_matched_confidence))
       ? Number(ctc.min_matched_confidence).toFixed(2)
       : 'off';
+    const targetMinConf = this._targetMinMatchedConfidence(ctc);
+    const targetMinConfText = targetMinConf.length
+      ? ` target_min_conf=[${targetMinConf.map((v) => (Number.isFinite(v) ? v.toFixed(2) : '-')).join(',')}]`
+      : '';
     const baseHits = Number.isFinite(Number(runtime.required_hits)) && Number(runtime.required_hits) > 0
       ? Math.max(1, Math.floor(Number(runtime.required_hits)))
       : null;
@@ -1081,7 +1085,7 @@ export class WakeWordTestSession {
       'info',
       `VWW CTC manifest "${modelName}": targets=${targetCount} ed<=${maxEd} `
       + `trail=${trail} min_conf=${minConf}`
-      + `${baseHits ? ` hits=${baseHits}` : ''}${targetHitsText}${bypass}${bypassHits}`,
+      + `${targetMinConfText}${baseHits ? ` hits=${baseHits}` : ''}${targetHitsText}${bypass}${bypassHits}`,
     );
 
     const anchors = Array.isArray(ctc.wake_word_target_anchors)
@@ -1098,12 +1102,24 @@ export class WakeWordTestSession {
       const group = Number.isInteger(targetGroups[i])
         ? ` group=${targetGroups[i] + 1}`
         : '';
+      const gate = Number.isFinite(targetMinConf[i])
+        ? ` min_conf=${targetMinConf[i].toFixed(2)}`
+        : '';
       this._emitLog(
         'info',
-        `CTC target [${i + 1}]${group}${hits ? ` hits=${hits}` : ''}${anchorList}: `
+        `CTC target [${i + 1}]${group}${hits ? ` hits=${hits}` : ''}${gate}${anchorList}: `
         + this._formatCtcTarget(ctc, i),
       );
     }
+  }
+
+  _targetMinMatchedConfidence(ctc) {
+    const raw = ctc?.target_min_matched_confidence;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    });
   }
 
   _targetRequiredHits(runtime) {
