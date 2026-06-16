@@ -301,6 +301,7 @@ export class VwwBackend {
     }
     const energy = ENERGY_THRESHOLDS[sensitivityLabel] || DEFAULT_ENERGY;
     const modesDesc = keywordConfigs.map((c) => {
+      const entry = entries[c.name];
       const r = runtime[c.name];
       if (r && typeof r.required_hits === 'number' && r.required_hits > 0) {
         const bypass = typeof r.high_confidence_bypass === 'number'
