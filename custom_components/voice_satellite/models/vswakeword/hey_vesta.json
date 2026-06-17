@@ -182,6 +182,7 @@
     ],
     "wake_word_target_anchors": [
       [
+        0,
         6,
         8
       ],
@@ -191,17 +192,25 @@
         7
       ],
       [
+        0,
         5,
         7
       ],
       [
+        0,
         4,
         6
       ]
     ],
     "max_edit_distance": 1,
     "wake_word_trail_tolerance": 3,
-    "min_matched_confidence": 4.5
+    "min_matched_confidence": 4.5,
+    "target_min_matched_confidence": [
+      4,
+      5.35,
+      4.5,
+      3.8
+    ]
   },
   "runtime": {
     "required_hits": 3,
@@ -213,7 +222,7 @@
       3,
       4,
       2,
-      3
+      4
     ]
   }
 }
