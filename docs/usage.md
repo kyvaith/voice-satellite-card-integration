@@ -224,7 +224,7 @@ data:
   type: black
 ```
 
-When fired, the new type is pushed to every browser subscribed to that satellite, persisted to the per-browser panel config (so it survives a page reload), and the screensaver re-renders immediately if it was already on screen. The media file/folder, website URL, idle timeout, brightness percentage, and other screensaver settings continue to come from the side panel.
+When fired, the new type is pushed to every browser subscribed to that satellite, persisted to the selected satellite's panel profile, and the screensaver re-renders immediately if it was already on screen. The media file/folder, website URL, idle timeout, brightness percentage, and other screensaver settings continue to come from the side panel.
 
 ### Fields
 

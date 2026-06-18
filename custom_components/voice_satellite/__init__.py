@@ -31,6 +31,7 @@ from .frontend import (
     async_register_static_paths,
     async_unregister_resource,
 )
+from .settings_store import async_get_panel_settings, async_save_panel_settings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -338,6 +339,12 @@ async def _async_handle_set_screensaver_service(call: ServiceCall) -> None:
                 "voice_satellite.set_screensaver: entity %s not found", entity_id
             )
             continue
+        stored = await async_get_panel_settings(hass, entity_id) or {
+            "satellite_entity": entity_id
+        }
+        if "type" in payload:
+            stored["screensaver_type"] = payload["type"]
+        await async_save_panel_settings(hass, entity_id, stored)
         entity._push_satellite_event("set_screensaver", payload)
 
 
@@ -399,6 +406,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     websocket_api.async_register_command(hass, ws_cancel_timer)
     websocket_api.async_register_command(hass, ws_media_player_event)
     websocket_api.async_register_command(hass, ws_screensaver_state)
+    websocket_api.async_register_command(hass, ws_get_panel_settings)
+    websocket_api.async_register_command(hass, ws_save_panel_settings)
     register_diagnostics(hass)
 
     # Same-origin proxy for HTTP-only media sources (e.g. Music Assistant)
@@ -473,6 +482,49 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         _LOGGER.warning("Failed to register frontend resources: %s", err)
 
     return True
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "voice_satellite/get_panel_settings",
+        vol.Required("entity_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_panel_settings(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Return persisted browser-panel settings for a satellite entity."""
+    entity_id = msg["entity_id"]
+    config = await async_get_panel_settings(hass, entity_id)
+    connection.send_result(
+        msg["id"],
+        {
+            "exists": config is not None,
+            "config": config or {},
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "voice_satellite/save_panel_settings",
+        vol.Required("entity_id"): str,
+        vol.Required("config"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_save_panel_settings(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Persist browser-panel settings for a satellite entity."""
+    entity_id = msg["entity_id"]
+    await async_save_panel_settings(hass, entity_id, msg["config"])
+    connection.send_result(msg["id"], {"success": True})
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

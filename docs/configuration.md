@@ -32,7 +32,7 @@ The top of the panel shows the current engine state (running/dormant) and pipeli
 
 ### Settings
 
-The primary settings for this browser. Pick the satellite device this browser should drive, and toggle whether the engine should start automatically on page load.
+The primary settings for this browser. Pick the satellite device this browser should drive, and toggle whether the engine should start automatically on page load. After a satellite is selected, the panel profile is persisted by Home Assistant and cached locally by the browser.
 
 | Setting | Description |
 |---------|-------------|
@@ -47,7 +47,7 @@ A live preview of the selected skin updates as you change appearance settings.
 
 ### Advanced
 
-Per-browser overlay appearance, microphone processing, timer behavior, and debug logging. Stored in local storage and persists across sessions.
+Per-satellite browser profile for overlay appearance, microphone processing, timer behavior, and debug logging. The selected satellite identifies the profile; Home Assistant stores it persistently and the browser keeps a local cache for startup/fallback.
 
 | Setting | Description |
 |---------|-------------|

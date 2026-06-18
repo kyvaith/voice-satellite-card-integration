@@ -5,8 +5,9 @@
  * voice satellite engine. Provides all settings (entity, appearance,
  * microphone, debug) plus a live preview of the selected skin.
  *
- * Config is stored in localStorage so each browser/device can have
- * its own settings. The running session picks up changes immediately.
+ * Config is cached in localStorage and persisted per selected satellite
+ * through Home Assistant storage. The running session picks up changes
+ * immediately.
  *
  * Uses light DOM (no shadow root) because ha-panel-custom renders
  * panels in light DOM and HA components like ha-form break inside
@@ -32,6 +33,7 @@ import { resolveDspForMode } from '../audio/dsp-config.js';
 import { getMicroModelParams, loadMicroModelParams } from '../wake-word/micro-models.js';
 import { getVwwModelParams, loadVwwModelParams } from '../wake-word/vww/manifest-cache.js';
 import { getSelectOptions, getSelectAttribute, getSelectState, getSwitchState } from '../shared/satellite-state.js';
+import { loadPanelConfig, savePanelConfig } from '../shared/server-settings.js';
 import { DiagnosticsManager } from '../diagnostics';
 import * as kiosk from '../kiosk/index.js';
 import { buildMarkdownReport } from '../diagnostics/report.js';
@@ -103,7 +105,7 @@ const STATE_COLORS = {
   [State.ERROR]: '#f44336',
 };
 
-/* ── Config persistence (localStorage, per-browser) ── */
+/* ── Config cache (localStorage, backed by HA storage) ── */
 
 function getStoredConfig() {
   try {
@@ -177,6 +179,10 @@ class VoiceSatellitePanel extends HTMLElement {
     this._formLoaded = false;
     this._microphoneOptions = [{ value: 'default', label: 'Browser default microphone' }];
     this._deviceChangeHandler = null;
+    this._localChangeVersion = 0;
+    this._serverConfigLoadedEntity = null;
+    this._serverConfigLoadSeq = 0;
+    this._serverConfigSaveTimer = null;
     this._config = Object.assign({}, DEFAULT_CONFIG, getStoredConfig());
     // Migrate legacy unified DSP keys into the STT group.
     const LEGACY_DSP_KEYS = ['noise_suppression', 'echo_cancellation', 'auto_gain_control', 'voice_isolation'];
@@ -209,6 +215,7 @@ class VoiceSatellitePanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._migrateScreensaverFromEntities();
+    this._loadServerConfigForSelectedEntity();
     if (!this._rendered) {
       this._buildDom();
     }
@@ -297,6 +304,10 @@ class VoiceSatellitePanel extends HTMLElement {
       navigator.mediaDevices?.removeEventListener?.('devicechange', this._deviceChangeHandler);
       this._deviceChangeHandler = null;
     }
+    if (this._serverConfigSaveTimer) {
+      clearTimeout(this._serverConfigSaveTimer);
+      this._serverConfigSaveTimer = null;
+    }
     // Tear down the standalone tester session if active so the mic is
     // released when the user navigates away from the panel. If we paused
     // the main engine for the test, restart it.
@@ -334,6 +345,106 @@ class VoiceSatellitePanel extends HTMLElement {
     if (ssFkForm) ssFkForm.hass = this._hass;
   }
 
+  _persistLocalConfig() {
+    setStoredConfig(this._config);
+    if (this._config.satellite_entity) {
+      setStoredEntity(this._config.satellite_entity);
+    } else {
+      clearStoredEntity();
+    }
+  }
+
+  _scheduleServerConfigSave() {
+    if (!this._hass || !this._config.satellite_entity) return;
+    if (this._serverConfigSaveTimer) clearTimeout(this._serverConfigSaveTimer);
+    this._serverConfigSaveTimer = setTimeout(() => {
+      this._serverConfigSaveTimer = null;
+      this._saveServerConfigNow();
+    }, 500);
+  }
+
+  async _saveServerConfigNow() {
+    if (this._serverConfigSaveTimer) {
+      clearTimeout(this._serverConfigSaveTimer);
+      this._serverConfigSaveTimer = null;
+    }
+    const entityId = this._config.satellite_entity;
+    if (!this._hass || !entityId) return false;
+    return savePanelConfig(this._hass, entityId, this._config);
+  }
+
+  async _loadServerConfigForSelectedEntity({ force = false, migrateIfMissing = true } = {}) {
+    const entityId = this._config.satellite_entity;
+    if (!this._hass || !entityId) return false;
+    if (!force && this._serverConfigLoadedEntity === entityId) return true;
+
+    const seq = ++this._serverConfigLoadSeq;
+    const changeVersion = this._localChangeVersion;
+    const result = await loadPanelConfig(this._hass, entityId);
+    if (seq !== this._serverConfigLoadSeq) return false;
+    if (this._config.satellite_entity !== entityId) return false;
+
+    this._serverConfigLoadedEntity = entityId;
+    if (result?.exists) {
+      if (this._localChangeVersion !== changeVersion) {
+        this._scheduleServerConfigSave();
+        return false;
+      }
+      this._config = Object.assign({}, DEFAULT_CONFIG, result.config || {}, {
+        satellite_entity: entityId,
+      });
+      if (!this._config.microphone_device_id) this._config.microphone_device_id = 'default';
+      this._persistLocalConfig();
+      const session = this._getSession();
+      if (session) {
+        session.updateConfig(Object.assign({}, this._config), { fromPanel: true });
+        if (this._hass) session.updateHass(this._hass);
+      }
+      this._syncConfigToUi({ rebuildSchemas: true });
+      return true;
+    }
+
+    if (migrateIfMissing) await this._saveServerConfigNow();
+    return false;
+  }
+
+  _syncConfigToUi({ rebuildSchemas = false } = {}) {
+    const entityForm = this.querySelector(`.${P}-entity-container ha-form`);
+    if (entityForm) entityForm.data = Object.assign({}, this._config);
+
+    const settingsForm = this.querySelector(`.${P}-form-container ha-form`);
+    if (settingsForm) {
+      settingsForm.data = Object.assign({}, this._config);
+      if (rebuildSchemas) settingsForm.schema = buildPanelSchema(this._config);
+    }
+
+    const autostartForm = this.querySelector(`.${P}-autostart-container ha-form`);
+    if (autostartForm) {
+      autostartForm.data = Object.assign({}, this._config);
+      if (rebuildSchemas) autostartForm.schema = buildAutoStartSchema(this._microphoneOptions);
+    }
+
+    const preForm = this.querySelector(`.${P}-ss-pre-container ha-form`);
+    if (preForm) {
+      preForm.data = Object.assign({}, this._config);
+      if (rebuildSchemas) preForm.schema = buildScreensaverPreSchema(this._config);
+    }
+
+    const postForm = this.querySelector(`.${P}-ss-post-container ha-form`);
+    if (postForm) {
+      postForm.data = Object.assign({}, this._config);
+      if (rebuildSchemas) postForm.schema = buildScreensaverPostSchema(this._config);
+    }
+
+    const fkForm = this.querySelector(`.${P}-ss-fk-form ha-form`);
+    if (fkForm) fkForm.data = Object.assign({}, this._config);
+
+    this._syncFkSectionVisibility();
+    this._updateScreensaverMediaVisibility();
+    this._updateStatus();
+    this._updatePreview();
+  }
+
   _updateStatus() {
     const session = this._getSession();
 
@@ -362,14 +473,16 @@ class VoiceSatellitePanel extends HTMLElement {
     }
   }
 
-  _onEntityChange(newData) {
+  async _onEntityChange(newData) {
+    const previousEntity = this._config.satellite_entity;
+    this._localChangeVersion += 1;
     this._config = Object.assign({}, this._config, newData);
-    setStoredConfig(this._config);
+    this._persistLocalConfig();
 
-    if (this._config.satellite_entity) {
-      setStoredEntity(this._config.satellite_entity);
+    if (this._config.satellite_entity && this._config.satellite_entity !== previousEntity) {
+      await this._loadServerConfigForSelectedEntity({ force: true, migrateIfMissing: true });
     } else {
-      clearStoredEntity();
+      this._scheduleServerConfigSave();
     }
 
     const session = this._getSession();
@@ -400,11 +513,7 @@ class VoiceSatellitePanel extends HTMLElement {
       }
     }
 
-    // Sync entity form
-    const entityForm = this.querySelector(`.${P}-entity-container ha-form`);
-    if (entityForm) entityForm.data = Object.assign({}, this._config);
-    this._updateStatus();
-    this._updatePreview();
+    this._syncConfigToUi();
   }
 
   _onSettingsChange(newData) {
@@ -415,8 +524,10 @@ class VoiceSatellitePanel extends HTMLElement {
         && !newData.microphone_device_id) {
       newData.microphone_device_id = 'default';
     }
+    this._localChangeVersion += 1;
     Object.assign(this._config, newData);
-    setStoredConfig(this._config);
+    this._persistLocalConfig();
+    this._scheduleServerConfigSave();
 
     // Propagate to running session (debug, mic constraints, reactive bar, etc.)
     const session = this._getSession();
@@ -1460,7 +1571,7 @@ class VoiceSatellitePanel extends HTMLElement {
           <div class="${P}-form-loading">Loading settings...</div>
         </div>
         <div class="${P}-hint">
-          Settings are stored per-browser and persist across sessions.
+          Settings are stored by Home Assistant for the selected satellite.
         </div>
       </div>
 

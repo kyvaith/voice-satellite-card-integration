@@ -15,6 +15,7 @@ import { resolveEntity } from '../shared/entity-picker.js';
 import { preloadChimes } from '../audio/chime.js';
 import { startDiagnostics } from '../memory-sampler.js';
 import { mountOverlayToast } from '../toast/overlay-ui.js';
+import { loadPanelConfig, savePanelConfig } from '../shared/server-settings.js';
 
 const ENGINE_KEY = '__vsEngine';
 const CONFIG_KEY = 'vs-panel-config';
@@ -27,6 +28,12 @@ function getStoredConfig() {
   } catch (_) {
     return {};
   }
+}
+
+function setStoredConfig(config) {
+  try {
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+  } catch (_) { /* private browsing */ }
 }
 
 /**
@@ -98,7 +105,7 @@ async function bootstrapEngine() {
   startHassObserver(ha, session);
 
   // Attempt entity resolution and start
-  attemptStart(ha.hass, session);
+  await attemptStart(ha.hass, session);
 
   // Explicit teardown on page unload. On memory-constrained Android
   // WebViews (Fully Kiosk on wall-mounted tablets) the browser can
@@ -125,17 +132,29 @@ async function bootstrapEngine() {
  * Try to resolve the satellite entity and start the session.
  * Called on init and whenever hass updates with no entity configured.
  */
-function attemptStart(hass, session) {
+async function attemptStart(hass, session) {
   if (session.isStarted) return;
   if (session._starting) return;
   if (session._userStopped) return;
-
-  // Respect auto_start setting from panel config
-  const storedConfig = getStoredConfig();
-  if (storedConfig.auto_start === false) return;
+  if (session._serverConfigHydrating) return;
 
   const entityId = resolveEntity(hass);
   if (!entityId) return;
+
+  if (session._serverConfigHydratedEntity !== entityId) {
+    session._serverConfigHydrating = true;
+    try {
+      await hydrateStoredConfig(hass, entityId);
+      session._serverConfigHydratedEntity = entityId;
+    } finally {
+      session._serverConfigHydrating = false;
+    }
+  }
+
+  // Respect auto_start after server-backed settings have had a chance to
+  // rehydrate the local cache.
+  const storedConfig = getStoredConfig();
+  if (storedConfig.auto_start === false) return;
 
   // Merge panel config (skin, mic settings, etc.) from localStorage
   const config = Object.assign({}, DEFAULT_CONFIG, getStoredConfig(), {
@@ -158,6 +177,23 @@ function attemptStart(hass, session) {
         session.start();
       }
     });
+  }
+}
+
+async function hydrateStoredConfig(hass, entityId) {
+  const localConfig = getStoredConfig();
+  const result = await loadPanelConfig(hass, entityId);
+  if (result?.exists) {
+    setStoredConfig(Object.assign({}, localConfig, result.config || {}, {
+      satellite_entity: entityId,
+    }));
+    return;
+  }
+
+  if (Object.keys(localConfig).length > 0) {
+    await savePanelConfig(hass, entityId, Object.assign({}, localConfig, {
+      satellite_entity: entityId,
+    }));
   }
 }
 

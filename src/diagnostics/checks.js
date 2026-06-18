@@ -274,7 +274,7 @@ export const CLIENT_CHECKS = [
       } catch (_) {
         return {
           status: 'warn',
-          detail: 'localStorage is not writable. Panel settings and the selected satellite will not persist across reloads.',
+          detail: 'localStorage is not writable. The selected satellite may not be remembered before the server-backed profile can load.',
           remediation: 'Disable private browsing or lift any storage restrictions on this origin.',
         };
       }

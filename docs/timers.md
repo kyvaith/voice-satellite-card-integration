@@ -120,4 +120,4 @@ Per-browser toggles under **Advanced > Timers** in the sidebar panel:
 | **Timer alert phrase** | `Your timer is up.` | Phrase for unnamed timers. Translate this to the language you use with this satellite |
 | **Named timer alert phrase** | `Your %%TIMER_NAME%% timer is up.` | Phrase for named timers. `%%TIMER_NAME%%` is replaced with the timer name when the alert fires |
 
-These settings are stored per-browser in localStorage. Toggling them takes effect live without restarting the engine.
+These settings are stored in the selected satellite's panel profile. Toggling them takes effect live without restarting the engine.
