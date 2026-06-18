@@ -13,6 +13,7 @@ const TYPE_OPTIONS = [
   { value: 'black', label: 'Black overlay' },
   { value: 'media', label: 'Media (file, folder, or camera)' },
   { value: 'website', label: 'Website' },
+  { value: 'clock', label: 'Digital clock' },
 ];
 
 /**
@@ -77,6 +78,12 @@ export function buildScreensaverPostSchema(cfg) {
     fields.push(
       { name: 'screensaver_website_url', selector: { text: { type: 'url' } } },
     );
+  } else if (type === 'clock') {
+    fields.push(
+      { name: 'screensaver_clock_24h', selector: { boolean: {} } },
+      { name: 'screensaver_clock_seconds', selector: { boolean: {} } },
+      { name: 'screensaver_clock_show_date', default: true, selector: { boolean: {} } },
+    );
   }
   return fields;
 }
@@ -105,6 +112,9 @@ export const screensaverLabels = {
   screensaver_media_interval_s: t(null, 'editor.screensaver.media_interval', 'Item interval'),
   screensaver_media_shuffle: t(null, 'editor.screensaver.media_shuffle', 'Shuffle folder items'),
   screensaver_website_url: t(null, 'editor.screensaver.website_url', 'Website URL'),
+  screensaver_clock_24h: t(null, 'editor.screensaver.clock_24h', '24-hour clock'),
+  screensaver_clock_seconds: t(null, 'editor.screensaver.clock_seconds', 'Show seconds'),
+  screensaver_clock_show_date: t(null, 'editor.screensaver.clock_show_date', 'Show date'),
   screensaver_suppress_external: t(null, 'editor.screensaver.suppress_external', 'External screensaver'),
 };
 
@@ -112,7 +122,7 @@ export const screensaverHelpers = {
   screensaver_dim_percent: t(null, 'editor.screensaver.helper_dim_percent', 'Hardware backlight level while the screensaver is showing (Fully Kiosk or Kiosker Pro). The previous brightness is restored on dismiss. 0% = fully dark, 100% = leave the backlight untouched (default).'),
   screensaver_fk_motion_dismiss: t(null, 'editor.screensaver.helper_fk_motion_dismiss', "Dismiss the screensaver when Fully Kiosk's camera-based motion detection fires. Fully Kiosk only (Kiosker Pro has no motion API). Requires Motion Detection to be enabled in the Fully Kiosk settings."),
   screensaver_timer_s: t(null, 'editor.screensaver.helper_timer', 'Idle seconds before the screensaver activates.'),
-  screensaver_type: t(null, 'editor.screensaver.helper_type', 'Black: solid overlay. Media: image/video file, folder, or camera feed from the HA media library (cameras stream over WebRTC with sub-second latency when available). Website: embed any URL (e.g. immich-kiosk, a photo frame app, a dashboard).'),
+  screensaver_type: t(null, 'editor.screensaver.helper_type', 'Black: solid overlay. Media: image/video file, folder, or camera feed from the HA media library (cameras stream over WebRTC with sub-second latency when available). Website: embed any URL (e.g. immich-kiosk, a photo frame app, a dashboard). Digital clock: large time and date on a black background.'),
   screensaver_media_interval_s: t(null, 'editor.screensaver.helper_media_interval', 'Seconds per image when cycling through a folder. Videos play to completion regardless of this value.'),
   screensaver_suppress_external: t(null, 'editor.screensaver.helper_suppress_external', "The selected switch is turned off for the duration of each voice interaction, then left alone so its owner (e.g. Fully Kiosk) can resume its own idle timer. Useful to manage Fully Kiosk's screensaver."),
 };

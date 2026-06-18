@@ -2,7 +2,7 @@
  * ScreensaverManager
  *
  * Built-in screensaver that overlays the display after an idle timeout.
- * Supports three display types:
+ * Supports four display types:
  *   - 'black'   — solid black overlay (original behavior, dims FK backlight)
  *   - 'media'   — images/videos/cameras from a media-source URI (single
  *                 file, folder for cycling, or a camera feed from HA's
@@ -10,6 +10,7 @@
  *                 entity has a provider, MJPEG otherwise)
  *   - 'website' — arbitrary URL in an <iframe>, useful for kiosk-style
  *                 apps like immich-kiosk
+ *   - 'clock'   — large digital time + date on a black background
  *
  * Also runs an external-screensaver keep-alive loop: while a voice
  * interaction is active, periodically turns off a user-selected switch
@@ -78,6 +79,12 @@ export class ScreensaverManager {
     this._mediaIntervalSeconds = 10;
     this._mediaShuffle = false;
     this._websiteUrl = '';
+    this._clock24h = false;
+    this._clockSeconds = false;
+    this._clockShowDate = true;
+    this._clockTimer = null;
+    this._clockTimeEl = null;
+    this._clockDateEl = null;
     this._suppressExternal = '';
     this._activityHandler = null;
     this._savedBrightness = null;
@@ -122,12 +129,16 @@ export class ScreensaverManager {
       }
     }
     const newFkMotionDismiss = cfg.screensaver_fk_motion_dismiss === true;
-    const newType = ['black', 'media', 'website'].includes(cfg.screensaver_type)
+    const newType = ['black', 'media', 'website', 'clock'].includes(cfg.screensaver_type)
       ? cfg.screensaver_type : 'black';
     const newMediaId = cfg.screensaver_media_id || '';
     const newMediaInterval = Math.max(2, parseInt(cfg.screensaver_media_interval_s, 10) || 10);
     const newMediaShuffle = cfg.screensaver_media_shuffle === true;
     const newWebsiteUrl = (cfg.screensaver_website_url || '').trim();
+    const newClock24h = cfg.screensaver_clock_24h === true;
+    const newClockSeconds = cfg.screensaver_clock_seconds === true;
+    // Defaults to on: only an explicit `false` hides the date.
+    const newClockShowDate = cfg.screensaver_clock_show_date !== false;
     const newSuppressExternal = cfg.screensaver_suppress_external || '';
 
     const settingsChanged =
@@ -139,7 +150,10 @@ export class ScreensaverManager {
       newMediaId !== this._mediaId ||
       newMediaInterval !== this._mediaIntervalSeconds ||
       newMediaShuffle !== this._mediaShuffle ||
-      newWebsiteUrl !== this._websiteUrl;
+      newWebsiteUrl !== this._websiteUrl ||
+      newClock24h !== this._clock24h ||
+      newClockSeconds !== this._clockSeconds ||
+      newClockShowDate !== this._clockShowDate;
 
     this._suppressExternal = newSuppressExternal;
 
@@ -156,6 +170,9 @@ export class ScreensaverManager {
     this._mediaIntervalSeconds = newMediaInterval;
     this._mediaShuffle = newMediaShuffle;
     this._websiteUrl = newWebsiteUrl;
+    this._clock24h = newClock24h;
+    this._clockSeconds = newClockSeconds;
+    this._clockShowDate = newClockShowDate;
 
     this._log.log('screensaver', `Settings: enabled=${newEnabled}, timer=${newTimer}s, type=${newType}`);
 
@@ -244,6 +261,7 @@ export class ScreensaverManager {
   teardown() {
     this._dismiss();
     this._stopCameraWebrtc();
+    this._stopClock();
     this._clearIdleTimer();
     this._removeActivityListeners();
     this._removeUnloadHandler();
@@ -317,6 +335,8 @@ export class ScreensaverManager {
       this._renderMedia();
     } else if (this._type === 'website') {
       this._renderWebsite();
+    } else if (this._type === 'clock') {
+      this._renderClock();
     }
 
     // Force reflow so the transition plays from opacity 0
@@ -333,9 +353,10 @@ export class ScreensaverManager {
     // Restore hardware backlight to whatever it was before we dimmed it
     this._restoreScreen();
 
-    // Stop media cycling and any WebRTC camera stream
+    // Stop media cycling, any WebRTC camera stream, and the clock tick
     this._stopMediaCycle();
     this._stopCameraWebrtc();
+    this._stopClock();
 
     if (this._overlay) {
       this._overlay.classList.remove('vs-screensaver-visible');
@@ -389,6 +410,104 @@ export class ScreensaverManager {
       this._log.log('screensaver', `Website iframe failed to load: ${this._websiteUrl}`);
     }, { once: true });
     this._contentEl.appendChild(iframe);
+  }
+
+  _renderClock() {
+    this._overlay.style.backgroundColor = '#000000';
+    if (!this._contentEl) return;
+    this._contentEl.innerHTML = '';
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = [
+      'position:absolute',
+      'inset:0',
+      'display:flex',
+      'flex-direction:column',
+      'align-items:center',
+      'justify-content:center',
+      'gap:0.35em',
+      'text-align:center',
+      'user-select:none',
+      "font-family:'Google Sans', var(--ha-font-family, Roboto, system-ui, sans-serif)",
+      // Tabular figures keep the digits from shifting as the time ticks.
+      'font-variant-numeric:tabular-nums',
+      "font-feature-settings:'tnum' 1",
+      'opacity:0',
+      `transition:opacity ${MEDIA_FADE_MS}ms ease`,
+    ].join(';');
+
+    const timeEl = document.createElement('div');
+    timeEl.style.cssText = [
+      'color:#fafafa',
+      'font-weight:300',
+      'letter-spacing:0.02em',
+      'line-height:1',
+      'font-size:min(20vw, 30vh)',
+    ].join(';');
+    wrap.appendChild(timeEl);
+    this._clockTimeEl = timeEl;
+
+    if (this._clockShowDate) {
+      const dateEl = document.createElement('div');
+      dateEl.style.cssText = [
+        'color:rgba(255,255,255,0.65)',
+        'font-weight:400',
+        'font-size:min(5vw, 7vh)',
+      ].join(';');
+      wrap.appendChild(dateEl);
+      this._clockDateEl = dateEl;
+    }
+
+    this._contentEl.appendChild(wrap);
+    this._updateClock();
+    this._startClock();
+    this._fadeInAndSweep(wrap);
+  }
+
+  /** Render the current time/date into the clock elements. */
+  _updateClock() {
+    if (!this._clockTimeEl) return;
+    const now = new Date();
+    // Use the device/browser locale so the time and date render in the
+    // viewer's own language and regional format. Passing undefined to
+    // toLocale* falls back to the runtime default locale (the device's).
+    const lang = (typeof navigator !== 'undefined' && navigator.language) || undefined;
+    const timeOpts = {
+      // Leading-zero hours read better in 24h ("09:05"); 12h drops it ("9:05").
+      hour: this._clock24h ? '2-digit' : 'numeric',
+      minute: '2-digit',
+      hour12: !this._clock24h,
+    };
+    if (this._clockSeconds) timeOpts.second = '2-digit';
+    this._clockTimeEl.textContent = now.toLocaleTimeString(lang, timeOpts);
+    if (this._clockDateEl) {
+      this._clockDateEl.textContent = now.toLocaleDateString(lang, {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+      });
+    }
+  }
+
+  /** Tick the clock, re-aligning to each second boundary so it stays accurate. */
+  _startClock() {
+    this._stopClock(false);
+    const tick = () => {
+      this._updateClock();
+      this._clockTimer = setTimeout(tick, 1000 - (Date.now() % 1000));
+    };
+    this._clockTimer = setTimeout(tick, 1000 - (Date.now() % 1000));
+  }
+
+  _stopClock(clearRefs = true) {
+    if (this._clockTimer) {
+      clearTimeout(this._clockTimer);
+      this._clockTimer = null;
+    }
+    if (clearRefs) {
+      this._clockTimeEl = null;
+      this._clockDateEl = null;
+    }
   }
 
   async _renderMedia() {
@@ -776,6 +895,25 @@ export class ScreensaverManager {
       const style = document.createElement('style');
       style.id = 'vs-screensaver-style';
       style.textContent = [
+        // The overlay lives in document.body, outside the skin CSS scope
+        // that defines our shipped fonts, so register Google Sans here at
+        // the document level for the digital-clock screensaver to use.
+        "@font-face {",
+        "  font-family: 'Google Sans';",
+        '  font-style: normal;',
+        '  font-weight: 400 700;',
+        '  font-display: swap;',
+        "  src: url('/voice_satellite/fonts/google-sans-latin-ext.woff2') format('woff2');",
+        '  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;',
+        '}',
+        "@font-face {",
+        "  font-family: 'Google Sans';",
+        '  font-style: normal;',
+        '  font-weight: 400 700;',
+        '  font-display: swap;',
+        "  src: url('/voice_satellite/fonts/google-sans-latin.woff2') format('woff2');",
+        '  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;',
+        '}',
         `#${OVERLAY_ID} {`,
         '  position: fixed;',
         '  inset: 0;',

@@ -123,12 +123,16 @@ export const DEFAULT_CONFIG = {
   // Screensaver
   screensaver_enabled: false,
   screensaver_timer_s: 60,
-  screensaver_type: 'black', // 'black' | 'media' | 'website'
+  screensaver_type: 'black', // 'black' | 'media' | 'website' | 'clock'
   screensaver_media_id: '',
   screensaver_media_interval_s: 10,
   screensaver_media_shuffle: false,
   screensaver_website_url: '',
   screensaver_suppress_external: '',
+  // Digital clock screensaver options
+  screensaver_clock_24h: false,
+  screensaver_clock_seconds: false,
+  screensaver_clock_show_date: true,
 
   // Kiosk browser integration — only effective inside Fully Kiosk
   // (Android) or Kiosker Pro (iOS) with the JS integration enabled.

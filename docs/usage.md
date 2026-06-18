@@ -230,7 +230,7 @@ When fired, the new type is pushed to every browser subscribed to that satellite
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | `string` | (required) | One of `black`, `media`, or `website`. `black` is a solid dark overlay (combine with a low brightness percentage in the panel for the strongest thermal savings). `media` uses the image/video/folder selected in the panel (cameras stream over WebRTC when available). `website` embeds the URL configured in the panel. |
+| `type` | `string` | (required) | One of `black`, `media`, `website`, or `clock`. `black` is a solid dark overlay (combine with a low brightness percentage in the panel for the strongest thermal savings). `media` uses the image/video/folder selected in the panel (cameras stream over WebRTC when available). `website` embeds the URL configured in the panel. `clock` shows a large digital time and date. |
 
 ### Examples
 
