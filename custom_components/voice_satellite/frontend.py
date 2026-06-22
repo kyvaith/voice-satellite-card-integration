@@ -150,9 +150,11 @@ async def async_register_sidebar_panel(hass: HomeAssistant) -> None:
         sidebar_icon="mdi:microphone-message",
         frontend_url_path="voice-satellite",
         require_admin=False,
+        update=True,
         config={
             "_panel_custom": {
                 "name": "voice-satellite-panel",
+                "module_url": panel_url,
                 "js_url": panel_url,
             }
         },
