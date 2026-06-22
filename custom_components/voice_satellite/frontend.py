@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from homeassistant.components.http import StaticPathConfig
+from aiohttp import web
+
+from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.components.lovelace.resources import (
     ResourceStorageCollection,
 )
@@ -29,6 +31,87 @@ BRAND_DIR = str(Path(__file__).parent / "brand")
 BRAND_URL = f"{URL_BASE}/brand"
 SOUNDS_DIR = str(Path(__file__).parent / "sounds")
 SOUNDS_URL = f"{URL_BASE}/sounds"
+_STATIC_VIEW_KEY = f"{URL_BASE}:static_fallback_view"
+
+_CONTENT_TYPES = {
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".onnx": "application/octet-stream",
+    ".tflite": "application/octet-stream",
+    ".wasm": "application/wasm",
+    ".woff2": "font/woff2",
+}
+
+
+def _safe_file_in(root: Path, relative_path: str) -> Path | None:
+    """Return a resolved child path, blocking path traversal."""
+    try:
+        base = root.resolve()
+        target = (base / relative_path).resolve()
+        target.relative_to(base)
+    except (OSError, ValueError):
+        return None
+    if not target.is_file():
+        return None
+    return target
+
+
+class VoiceSatelliteStaticView(HomeAssistantView):
+    """Fallback static file server for /voice_satellite/*.
+
+    Home Assistant's static path registry can keep a stale route across HACS
+    update/reload cycles. The sidebar panel is registered with an absolute
+    /voice_satellite URL, so a missing static route makes the panel impossible
+    to load. This view serves the same files directly and keeps the route
+    stable across updates.
+    """
+
+    url = f"{URL_BASE}/{{requested_path:.+}}"
+    name = "voice_satellite:static"
+    requires_auth = False
+
+    async def get(self, request: web.Request, requested_path: str) -> web.FileResponse:
+        """Serve a frontend, model, brand, or sound file."""
+        path = requested_path.lstrip("/")
+        roots: tuple[tuple[str, Path], ...] = (
+            ("models/", Path(MODELS_DIR)),
+            ("brand/", Path(BRAND_DIR)),
+            ("sounds/", Path(SOUNDS_DIR)),
+            ("", Path(FRONTEND_DIR)),
+        )
+        for prefix, root in roots:
+            if not path.startswith(prefix):
+                continue
+            relative = path.removeprefix(prefix)
+            if file_path := _safe_file_in(root, relative):
+                content_type = _CONTENT_TYPES.get(file_path.suffix.lower())
+                headers = {"Cache-Control": "no-cache"}
+                if content_type:
+                    headers["Content-Type"] = content_type
+                return web.FileResponse(file_path, headers=headers)
+            break
+        raise web.HTTPNotFound()
+
+
+def register_static_fallback_view(hass: HomeAssistant) -> None:
+    """Register the fallback view once."""
+    if hass.data.get(_STATIC_VIEW_KEY):
+        return
+    try:
+        hass.http.register_view(VoiceSatelliteStaticView())
+        hass.data[_STATIC_VIEW_KEY] = True
+        _LOGGER.debug("Static fallback view registered: %s", URL_BASE)
+    except RuntimeError:
+        hass.data[_STATIC_VIEW_KEY] = True
+        _LOGGER.debug("Static fallback view already registered: %s", URL_BASE)
 
 
 def _get_resources(hass: HomeAssistant) -> ResourceStorageCollection | None:
@@ -49,6 +132,8 @@ def _get_resources(hass: HomeAssistant) -> ResourceStorageCollection | None:
 
 async def async_register_static_paths(hass: HomeAssistant) -> None:
     """Register /voice_satellite/* as static HTTP paths."""
+    register_static_fallback_view(hass)
+
     paths: list[StaticPathConfig] = []
 
     if Path(MODELS_DIR).is_dir():
