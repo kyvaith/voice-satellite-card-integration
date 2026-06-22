@@ -1,4 +1,5 @@
 import { State, BlurReason } from '../constants.js';
+import { getSwitchState } from '../shared/satellite-state.js';
 import {
   mergeAssistantTurnText,
   mergeDisplayTurnText,
@@ -291,12 +292,19 @@ export class PipecatAssistRealtimeClient {
     this._card.chat.streamedResponse = '';
 
     if (restart) {
+      this.playDoneChimeIfEnabled();
       this._card.chat.clear();
       this._card.ui.hideBlurOverlay(BlurReason.PIPELINE);
       this._card.mediaPlayer.resumeAfterInterrupt();
       this._card.setState(State.IDLE);
       this._pipeline.restart(0);
     }
+  }
+
+  playDoneChimeIfEnabled() {
+    const satelliteId = this._card.config?.satellite_entity;
+    if (getSwitchState(this._card.hass, satelliteId, 'wake_sound') === false) return;
+    this._card.tts?.playChime?.('done');
   }
 
   clearEndConversationRequest() {
