@@ -13,7 +13,9 @@
  */
 
 import { State, INTERACTING_STATES, BlurReason, Timing } from '../constants.js';
-import { getSelectState } from '../shared/satellite-state.js';
+import { getSelectState, getSwitchState } from '../shared/satellite-state.js';
+import { CHIME_WAKE, getChimeDuration } from '../audio/chime.js';
+import { PipecatAssistRealtimeClient } from '../pipecat-assist';
 import { subscribePipelineRun, setupReconnectListener } from './comms.js';
 import {
   handleRunStart,
@@ -81,6 +83,7 @@ export class PipelineManager {
     // superseded and abort without clobbering the current subscription.
     this._pipelineGen = 0;
     this._cancelInit = null;
+    this._pipecat = new PipecatAssistRealtimeClient(this);
   }
   get card() { return this._card; }
   get log() { return this._log; }
@@ -128,6 +131,12 @@ export class PipelineManager {
   set wasContinuation(val) { this._wasContinuation = val; }
   get currentLanguage() { return this._currentLanguage; }
   set currentLanguage(val) { this._currentLanguage = val; }
+  get pipecat() { return this._pipecat; }
+
+  _usePipecatAssist() {
+    return this._card.config?.use_pipecat_assist === true;
+  }
+
   async start(options) {
     const opts = options || {};
     const { connection, config } = this._card;
@@ -148,10 +157,24 @@ export class PipelineManager {
     }
     this._binaryHandlerId = null;
 
+    const startStage = opts.start_stage || 'wake_word';
+    if (this._usePipecatAssist() && startStage !== 'wake_word') {
+      this._startStage = startStage;
+      this._runStartReceived = true;
+      this._wakeWordPhase = false;
+      this._errorReceived = false;
+      this._log.log('pipecat', `Starting Pipecat Assist realtime turn: ${JSON.stringify({
+        start_stage: startStage,
+        wake_word_slot: opts.wake_word_slot || null,
+      })}`);
+      await this._pipecat.start(opts);
+      return;
+    }
+
     setupReconnectListener(this._card, this, connection, this._reconnectRef);
 
     const runConfig = {
-      start_stage: opts.start_stage || 'wake_word',
+      start_stage: startStage,
       end_stage: opts.end_stage || 'tts',
       sample_rate: 16000,
     };
@@ -309,6 +332,7 @@ export class PipelineManager {
     this._card.audio.stopBuffering?.({ clear: true });
     this._binaryHandlerId = null;
     this._isStreaming = false;
+    await this._pipecat.stop({ restart: false });
 
     if (this._unsubscribe) {
       try { await this._unsubscribe(); } catch (_) { /* cleanup */ }
@@ -481,6 +505,11 @@ export class PipelineManager {
       return;
     }
     this._wakeWordPhase = false;
+    if (this._usePipecatAssist() && this._startStage === 'wake_word') {
+      handleWakeWordEnd(this, data);
+      this._handoffServerWakeWordToPipecat(data);
+      return;
+    }
     handleWakeWordEnd(this, data);
   }
 
@@ -646,5 +675,34 @@ export class PipelineManager {
       clearTimeout(this._intentErrorBarTimeout);
       this._intentErrorBarTimeout = null;
     }
+  }
+
+  _handoffServerWakeWordToPipecat(data) {
+    const wakeSound = getSwitchState(this._card.hass, this._card.config.satellite_entity, 'wake_sound') !== false;
+    const delay = wakeSound ? (getChimeDuration(CHIME_WAKE) * 1000) + 250 : 0;
+    const wakeWordSlot = data?.wake_word_output?.wake_word_slot || data?.wake_word_slot || null;
+    this._log.log('pipecat', `Server wake word detected - handing conversation to Pipecat Assist in ${Math.round(delay)}ms`);
+
+    this.stop().then(() => {
+      setTimeout(() => {
+        this.start({
+          start_stage: 'stt',
+          wake_word_slot: wakeWordSlot === 1 || wakeWordSlot === 2 ? wakeWordSlot : undefined,
+        }).catch((e) => {
+          const msg = e?.message || JSON.stringify(e);
+          this._log.error('pipecat', `Pipecat handoff failed: ${msg}`);
+          this._card.toast?.show({
+            id: 'pipecat-assist.handoff-failed',
+            severity: 'error',
+            category: 'Pipecat Assist',
+            description: `Could not start Pipecat Assist after wake word. ${msg}`.trim(),
+          });
+          this.restart(this.calculateRetryDelay());
+        });
+      }, delay);
+    }).catch((e) => {
+      this._log.error('pipecat', `HA wake pipeline stop failed during handoff: ${e?.message || e}`);
+      this.restart(this.calculateRetryDelay());
+    });
   }
 }

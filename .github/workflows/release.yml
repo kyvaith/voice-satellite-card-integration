@@ -32,9 +32,7 @@ jobs:
         run: npm run build
 
       - name: Create integration zip
-        run: |
-          cd custom_components/voice_satellite
-          zip -r ../../voice-satellite-card.zip .
+        run: python scripts/package-integration.py
 
       - name: Upload release assets
         env:

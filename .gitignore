@@ -4,8 +4,7 @@
 # Node
 node_modules/
 
-# Build artifacts (CI builds production JS for releases)
-custom_components/voice_satellite/frontend/
+# Build artifacts
 custom_components/voice_satellite/tflite/
 
 # Python

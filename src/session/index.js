@@ -358,6 +358,7 @@ export class VoiceSatelliteSession {
     ];
     const sessionKeys = [
       'satellite_entity', 'debug',
+      'use_pipecat_assist',
       ...micKeys,
       'seamless_wake_command', 'stt_followup_delay_ms', 'stt_followup_chime',
       'reactive_bar', 'reactive_bar_update_interval_ms',

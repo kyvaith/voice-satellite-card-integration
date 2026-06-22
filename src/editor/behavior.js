@@ -66,6 +66,7 @@ export const microphoneSchema = [
 
 export const autoStartSchema = [
   { name: 'auto_start', default: true, selector: { boolean: {} } },
+  { name: 'use_pipecat_assist', default: false, selector: { boolean: {} } },
   {
     name: 'microphone_device_id',
     default: 'default',
@@ -87,6 +88,7 @@ export function buildAutoStartSchema(microphoneOptions = []) {
     : [{ value: 'default', label: 'Browser default microphone' }];
   return [
     { name: 'auto_start', default: true, selector: { boolean: {} } },
+    { name: 'use_pipecat_assist', default: false, selector: { boolean: {} } },
     {
       name: 'microphone_device_id',
       default: 'default',
@@ -139,6 +141,7 @@ export const timersSchema = buildTimersSchema();
 export const behaviorLabels = {
   satellite_entity: t(null, 'editor.behavior.satellite_entity', 'Satellite entity'),
   auto_start: t(null, 'editor.behavior.auto_start', 'Auto start'),
+  use_pipecat_assist: t(null, 'editor.behavior.use_pipecat_assist', 'Use Pipecat Assist instead of HA Assist'),
   microphone_device_id: t(null, 'editor.behavior.microphone_device_id', 'Microphone'),
   debug: t(null, 'editor.behavior.debug', 'Debug logging'),
   hide_timer_pills: t(null, 'editor.behavior.hide_timer_pills', 'Hide on-screen countdown'),
@@ -165,6 +168,7 @@ export const behaviorLabels = {
 export const behaviorHelpers = {
   satellite_entity: t(null, 'editor.behavior.helper_satellite_entity', 'Add a satellite device first via Settings → Devices & Services → Voice Satellite.'),
   auto_start: t(null, 'editor.behavior.helper_auto_start', 'Automatically start the voice engine when the page loads. When off, use the Start button to activate manually.'),
+  use_pipecat_assist: t(null, 'editor.behavior.helper_use_pipecat_assist', 'Use the Pipecat Assist add-on realtime WebRTC assistant for conversations after the wake word is detected. Wake word and microphone handling stay managed by Voice Satellite.'),
   microphone_device_id: t(null, 'editor.behavior.helper_microphone_device_id', 'Use the browser default microphone, or select a specific input if the default device is silent or wrong.'),
   wake_word_voice_isolation: t(null, 'editor.behavior.helper_voice_isolation', 'AI-based voice isolation, currently only available in Chrome'),
   stt_voice_isolation: t(null, 'editor.behavior.helper_voice_isolation', 'AI-based voice isolation, currently only available in Chrome'),

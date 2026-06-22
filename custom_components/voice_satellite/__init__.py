@@ -533,9 +533,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Safety net: verify frontend resources exist (covers HACS update edge cases
     # where async_setup registration may have failed or the resource was deleted
-    # during the unload/reload cycle)
+    # during the unload/reload cycle).
     try:
+        await async_register_static_paths(hass)
         await async_register_resource(hass)
+        await async_register_sidebar_panel(hass)
     except Exception as err:
         _LOGGER.warning("Failed to verify frontend resource: %s", err)
 
