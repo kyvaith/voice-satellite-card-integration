@@ -1,15 +1,15 @@
-const END_CONVERSATION_PHRASES = [
-  'to wszystko',
-  'koniec rozmowy',
-  'ok koniec',
-  'okej koniec',
-  'that is all',
-  "that's all",
-  'end conversation',
-  'stop listening',
-  'we are done',
-  'goodbye',
+const END_CONVERSATION_PATTERNS = [
+  /\b(to wszystko|wystarczy|dziekuje to wszystko|dzieki to wszystko)\b/,
+  /\b(dziekuje koniec|dzieki koniec|ok koniec|okej koniec|dobra koniec)\b/,
+  /\b(koniec rozmowy|konczymy rozmowe|zakoncz rozmowe|zakonczmy rozmowe)\b/,
+  /\b(przestan sluchac|nie sluchaj|nie nasluchuj)\b/,
+  /\b(that is all|that's all|thanks that's all|thank you that's all)\b/,
+  /\b(end conversation|stop listening|we are done|goodbye|bye for now)\b/,
+  /\b(milego dnia|do uslyszenia|do zobaczenia|na razie)\b/,
+  /\b(have a nice day|talk to you later|see you later)\b/,
 ];
+const SHORT_END_CONVERSATION_PATTERN =
+  /^(?:ok|okej|dobra|no|dziekuje|dzieki|thanks|thank you)?\s*(?:koniec|wystarczy|goodbye|bye)\s*$/;
 
 export function normalizeTranscriptText(value) {
   return String(value || '')
@@ -206,9 +206,15 @@ export function mergeAssistantTurnText(existing, incoming, priority, currentPrio
 
 export function shouldEndConversation(text) {
   const clean = String(text || '')
+    .replace(/ł/g, 'l')
+    .replace(/Ł/g, 'L')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[.,!?]/g, ' ')
+    .replace(/[^a-z0-9']+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return END_CONVERSATION_PHRASES.some((phrase) => clean.includes(phrase));
+  if (!clean) return false;
+  return SHORT_END_CONVERSATION_PATTERN.test(clean)
+    || END_CONVERSATION_PATTERNS.some((pattern) => pattern.test(clean));
 }

@@ -152,6 +152,9 @@ export class PipecatAssistRealtimeClient {
     this._lastUserTurnFinishedAt = 0;
     this._ignoreLocalSpeechUntil = 0;
     this._assistantTurnFinishTimer = null;
+    this._endConversationPending = false;
+    this._endConversationTimer = null;
+    this._endConversationStopping = false;
   }
 
   async start(opts = {}) {
@@ -251,6 +254,7 @@ export class PipecatAssistRealtimeClient {
       clearTimeout(this._assistantTurnFinishTimer);
       this._assistantTurnFinishTimer = null;
     }
+    this.clearEndConversationRequest();
     if (this._pingTimer) {
       clearInterval(this._pingTimer);
       this._pingTimer = null;
@@ -293,6 +297,32 @@ export class PipecatAssistRealtimeClient {
       this._card.setState(State.IDLE);
       this._pipeline.restart(0);
     }
+  }
+
+  clearEndConversationRequest() {
+    if (this._endConversationTimer) {
+      clearTimeout(this._endConversationTimer);
+      this._endConversationTimer = null;
+    }
+    this._endConversationPending = false;
+  }
+
+  finishConversationAfterAssistant(delayMs = 350) {
+    if (this._endConversationStopping) return;
+    this._endConversationStopping = true;
+    this.clearEndConversationRequest();
+    window.setTimeout(() => {
+      this.endConversation();
+      this._endConversationStopping = false;
+    }, delayMs);
+  }
+
+  requestConversationEnd(fallbackMs = 8000) {
+    this._endConversationPending = true;
+    if (this._endConversationTimer) clearTimeout(this._endConversationTimer);
+    this._endConversationTimer = window.setTimeout(() => {
+      this.finishConversationAfterAssistant(0);
+    }, fallbackMs);
   }
 
   fail(message) {
@@ -559,6 +589,10 @@ export class PipecatAssistRealtimeClient {
     this._assistantTurnActive = false;
     this._card.chat.streamEl = null;
     this._card.chat.streamedResponse = '';
+    if (this._endConversationPending) {
+      this.finishConversationAfterAssistant(350);
+      return;
+    }
     if (this._started) {
       this.ensureLocalAudioTrackActive();
       this._card.setState(State.STT);
@@ -604,7 +638,7 @@ export class PipecatAssistRealtimeClient {
     this.ensureLocalAudioTrackActive();
     this._card.setState(State.STT);
     if (shouldEndConversation(`${this._currentUserText} ${this._partialTranscript}`)) {
-      window.setTimeout(() => this.endConversation(), 450);
+      this.requestConversationEnd(9000);
     }
   }
 
@@ -649,7 +683,7 @@ export class PipecatAssistRealtimeClient {
     this._card.chat.streamedResponse = this._assistantTurnText;
     this._card.chat.updateResponse(this._assistantTurnText);
     if (shouldEndConversation(this._assistantTranscript)) {
-      window.setTimeout(() => this.endConversation(), 650);
+      this.requestConversationEnd(5000);
     }
   }
 
@@ -663,6 +697,10 @@ export class PipecatAssistRealtimeClient {
     }
     const type = String(message.type || message.event || message.name || '').toLowerCase();
     const label = String(message.label || '').toLowerCase();
+    if (['conversation-ended', 'conversation_end', 'end-conversation'].includes(type)) {
+      this.requestConversationEnd(1200);
+      return;
+    }
 
     if (type === 'bot-llm-started') this.beginAssistantTurn(State.INTENT);
     if (type === 'bot-tts-started' || type === 'bot-started-speaking') this.beginAssistantTurn(State.TTS);
