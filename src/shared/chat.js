@@ -10,6 +10,7 @@ export class ChatManager {
     this._log = card.logger;
 
     this._streamEl = null;
+    this._userStreamEl = null;
     this._streamedResponse = '';
     this._thinkingEl = null;
 
@@ -31,6 +32,19 @@ export class ChatManager {
 
   showTranscription(text) {
     this.addUser(text);
+  }
+
+  updateUser(text, fresh) {
+    if (!this._userStreamEl || fresh) {
+      this._userStreamEl = this._card.ui.addChatMessage(text, 'user');
+    } else {
+      this._card.ui.updateChatText(this._userStreamEl, text);
+      this._autoScroll();
+    }
+  }
+
+  finishUser() {
+    this._userStreamEl = null;
   }
 
   showResponse(text) {
@@ -112,6 +126,7 @@ export class ChatManager {
     this.removeThinking();
     this._card.ui.clearChat();
     this._streamEl = null;
+    this._userStreamEl = null;
     this._streamedResponse = '';
     this._fadeSpans = null;
     this._solidNode = null;

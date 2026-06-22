@@ -71,6 +71,7 @@ export const DEFAULT_CONFIG = {
   // Behavior
   satellite_entity: '',
   auto_start: true,
+  use_pipecat_assist: false,
   microphone_device_id: 'default',
   debug: false,
 

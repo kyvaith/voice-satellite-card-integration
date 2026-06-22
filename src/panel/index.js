@@ -520,6 +520,7 @@ class VoiceSatellitePanel extends HTMLElement {
     const prevScreensaverType = this._config.screensaver_type;
     const prevScreensaverEnabled = this._config.screensaver_enabled;
     const prevTimerTtsEnabled = this._config.timer_tts_enabled;
+    const prevUsePipecatAssist = this._config.use_pipecat_assist === true;
     if (Object.prototype.hasOwnProperty.call(newData, 'microphone_device_id')
         && !newData.microphone_device_id) {
       newData.microphone_device_id = 'default';
@@ -533,6 +534,9 @@ class VoiceSatellitePanel extends HTMLElement {
     const session = this._getSession();
     if (session) {
       session.updateConfig(Object.assign({}, this._config), { fromPanel: true });
+      if (prevUsePipecatAssist !== (this._config.use_pipecat_assist === true) && session.isStarted) {
+        session.pipeline.restart(0);
+      }
     }
 
     // Sync main settings form
