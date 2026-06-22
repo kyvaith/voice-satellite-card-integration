@@ -49,9 +49,7 @@ def _get_resources(hass: HomeAssistant) -> ResourceStorageCollection | None:
 
 async def async_register_static_paths(hass: HomeAssistant) -> None:
     """Register /voice_satellite/* as static HTTP paths."""
-    paths: list[StaticPathConfig] = [
-        StaticPathConfig(URL_BASE, FRONTEND_DIR, False),
-    ]
+    paths: list[StaticPathConfig] = []
 
     if Path(MODELS_DIR).is_dir():
         paths.append(StaticPathConfig(MODELS_URL, MODELS_DIR, True))
@@ -61,6 +59,8 @@ async def async_register_static_paths(hass: HomeAssistant) -> None:
 
     if Path(SOUNDS_DIR).is_dir():
         paths.append(StaticPathConfig(SOUNDS_URL, SOUNDS_DIR, True))
+
+    paths.append(StaticPathConfig(URL_BASE, FRONTEND_DIR, False))
 
     for cfg in paths:
         try:
