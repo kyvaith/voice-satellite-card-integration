@@ -146,7 +146,11 @@ export function setState(session, newState) {
   const sttPhase = (s) => s === State.WAKE_WORD_DETECTED || s === State.STT;
   const wasStt = sttPhase(oldState);
   const isStt = sttPhase(newState);
-  if (wasStt !== isStt && session._hasStarted && session.audio?.switchMicMode) {
+  const pipecatRealtimeActive = session.config?.use_pipecat_assist === true
+    && session.pipeline?.pipecat?.active;
+  if (pipecatRealtimeActive) {
+    session.audio?.setMicTracksMuted?.(false);
+  } else if (wasStt !== isStt && session._hasStarted && session.audio?.switchMicMode) {
     const targetMode = isStt ? 'stt' : 'wake_word';
     const keepWakeStreamForSeamless = isStt
       && session._seamlessWakeActive === true

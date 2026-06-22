@@ -94,6 +94,25 @@ function isRtviAssistantTextType(type) {
   return rtviAssistantTextPriority(type) > 0;
 }
 
+function compactComparableTranscript(value) {
+  return normalizeTranscriptText(value)
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function isSameTranscriptTurn(left, right) {
+  const leftText = normalizeTranscriptText(left);
+  const rightText = normalizeTranscriptText(right);
+  if (!leftText || !rightText) return false;
+  const leftCompact = compactComparableTranscript(leftText);
+  const rightCompact = compactComparableTranscript(rightText);
+  if (!leftCompact || !rightCompact) return false;
+  if (leftCompact === rightCompact) return true;
+  const shortest = Math.min(leftCompact.length, rightCompact.length);
+  if (shortest >= 8 && (leftCompact.includes(rightCompact) || rightCompact.includes(leftCompact))) return true;
+  return isLikelyTranscriptEcho(leftText, rightText) || isLikelyTranscriptEcho(rightText, leftText);
+}
+
 export class PipecatAssistRealtimeClient {
   constructor(pipeline) {
     this._pipeline = pipeline;
@@ -107,6 +126,7 @@ export class PipecatAssistRealtimeClient {
     this._started = false;
     this._stopping = false;
     this._audioBlocked = false;
+    this._localAudioTrack = null;
     this._clientIdKey = 'voice-satellite-pipecat-assist-client-id';
     this.clearTurnState();
   }
@@ -128,6 +148,8 @@ export class PipecatAssistRealtimeClient {
     this._assistantLastTurnFinishedAt = 0;
     this._lastAssistantTextAt = 0;
     this._lastUserTextAt = 0;
+    this._lastUserTurnText = '';
+    this._lastUserTurnFinishedAt = 0;
     this._ignoreLocalSpeechUntil = 0;
     this._assistantTurnFinishTimer = null;
   }
@@ -145,10 +167,14 @@ export class PipecatAssistRealtimeClient {
       await audio.startMicrophone('stt');
     }
     if (audio.currentMicMode !== 'stt') {
-      audio.switchMicMode?.('stt')?.catch((e) => {
+      try {
+        await audio.switchMicMode?.('stt');
+      } catch (e) {
         this._log.error('pipecat', `switchMicMode(stt) failed: ${e?.message || e}`);
-      });
+        throw e;
+      }
     }
+    audio.setMicTracksMuted?.(false);
     audio.stopSending();
 
     this._card.setState(State.STT);
@@ -160,7 +186,11 @@ export class PipecatAssistRealtimeClient {
       this._peer = peer;
 
       const track = audio._mediaStream?.getAudioTracks?.()[0];
-      if (track) peer.addTransceiver(track, { direction: 'sendrecv' });
+      if (track) {
+        track.enabled = true;
+        this._localAudioTrack = track;
+        peer.addTransceiver(track, { direction: 'sendrecv' });
+      }
       else peer.addTransceiver('audio', { direction: 'sendrecv' });
 
       this._channel = peer.createDataChannel('signalling');
@@ -177,6 +207,7 @@ export class PipecatAssistRealtimeClient {
         this._log.log('pipecat', `WebRTC connectionState=${peer.connectionState}`);
         if (peer.connectionState === 'connected') {
           this._pipeline.serviceUnavailable = false;
+          this.ensureLocalAudioTrackActive();
           this._card.setState(State.STT);
         }
         if (['failed', 'disconnected'].includes(peer.connectionState)) {
@@ -241,6 +272,7 @@ export class PipecatAssistRealtimeClient {
     });
     try { this._peer?.close(); } catch (_) {}
     this._peer = null;
+    this._localAudioTrack = null;
 
     this.resetAudioElement();
     this._remoteStream?.getTracks?.().forEach((track) => {
@@ -437,11 +469,64 @@ export class PipecatAssistRealtimeClient {
     return cleaned;
   }
 
+  rememberUserTurn(text = this._currentUserText, at = Date.now()) {
+    const normalized = normalizeTranscriptText(text);
+    if (!normalized) return;
+    this._lastUserTurnText = normalized;
+    this._lastUserTurnFinishedAt = at;
+  }
+
+  isLateUserTranscriptReplay(cleanedText, now) {
+    const references = [
+      this._currentUserText,
+      this._lastUserTurnText,
+    ].filter(Boolean);
+    if (!references.length) return false;
+
+    const assistantAlreadyMovedOn = this._assistantTurnActive
+      || this._lastAssistantTextAt > this._currentUserUpdatedAt
+      || this._assistantLastTurnFinishedAt > this._lastUserTurnFinishedAt;
+    const recentUserTurn = this._lastUserTurnFinishedAt && now - this._lastUserTurnFinishedAt < 15000;
+    const recentAssistantTurn = this._lastAssistantTextAt && now - this._lastAssistantTextAt < 15000;
+    if (!assistantAlreadyMovedOn || (!recentUserTurn && !recentAssistantTurn)) return false;
+    return references.some((reference) => isSameTranscriptTurn(cleanedText, reference));
+  }
+
+  ensureLocalAudioTrackActive() {
+    const audio = this._card.audio;
+    audio?.setMicTracksMuted?.(false);
+
+    const currentTrack = audio?._mediaStream?.getAudioTracks?.()[0] || null;
+    if (currentTrack) currentTrack.enabled = true;
+
+    const hasLiveSender = this._peer?.getSenders?.()
+      .some((sender) => sender.track?.kind === 'audio' && sender.track.readyState !== 'ended');
+    if (hasLiveSender) {
+      this._localAudioTrack = this._peer.getSenders()
+        .find((sender) => sender.track?.kind === 'audio' && sender.track.readyState !== 'ended')?.track
+        || this._localAudioTrack;
+      return;
+    }
+
+    if (!currentTrack || currentTrack.readyState === 'ended') return;
+    const sender = this._peer?.getSenders?.().find((candidate) => candidate.track?.kind === 'audio' || !candidate.track);
+    if (!sender || sender.track === currentTrack) return;
+    sender.replaceTrack(currentTrack)
+      .then(() => {
+        this._localAudioTrack = currentTrack;
+        this._log.log('pipecat', 'Re-attached live microphone track to Pipecat WebRTC sender');
+      })
+      .catch((e) => {
+        this._log.error('pipecat', `replaceTrack failed: ${e?.message || e}`);
+      });
+  }
+
   beginAssistantTurn(stage = State.TTS) {
     if (this._assistantTurnFinishTimer) {
       clearTimeout(this._assistantTurnFinishTimer);
       this._assistantTurnFinishTimer = null;
     }
+    this.rememberUserTurn();
     if (!this._assistantTurnActive) {
       this._assistantTurnBase = normalizeTranscriptText(this._assistantTranscript);
       this._assistantTurnText = '';
@@ -474,7 +559,10 @@ export class PipecatAssistRealtimeClient {
     this._assistantTurnActive = false;
     this._card.chat.streamEl = null;
     this._card.chat.streamedResponse = '';
-    if (this._started) this._card.setState(State.STT);
+    if (this._started) {
+      this.ensureLocalAudioTrackActive();
+      this._card.setState(State.STT);
+    }
   }
 
   scheduleAssistantTurnFinish(delayMs = 1000) {
@@ -488,6 +576,11 @@ export class PipecatAssistRealtimeClient {
     if (!cleanedText) return;
     if (this.assistantEchoReferences().some((reference) => isLikelyTranscriptEcho(cleanedText, reference))) return;
     const now = Date.now();
+    if (this.isLateUserTranscriptReplay(cleanedText, now)) {
+      this._log.log('pipecat', `Ignoring late user transcript replay: ${cleanedText}`);
+      this.ensureLocalAudioTrackActive();
+      return;
+    }
     this._lastUserTextAt = now;
     const startsNewUserTurn = this._lastAssistantTextAt > this._currentUserUpdatedAt
       || (!this._partialTranscript && this._currentUserUpdatedAt && now - this._currentUserUpdatedAt > 8000);
@@ -498,6 +591,7 @@ export class PipecatAssistRealtimeClient {
       this._currentUserUpdatedAt = now;
       this._userTranscript = mergeTranscript(this._userTranscript, cleanedText);
       this._partialTranscript = '';
+      this.rememberUserTurn(this._currentUserText, now);
     } else {
       this._partialTranscript = cleanedText;
       this._currentUserText = startsNewUserTurn
@@ -507,6 +601,7 @@ export class PipecatAssistRealtimeClient {
     }
     this._card.chat.updateUser?.(this._currentUserText, startsNewUserTurn);
     if (finalEvent) this._card.chat.finishUser?.();
+    this.ensureLocalAudioTrackActive();
     this._card.setState(State.STT);
     if (shouldEndConversation(`${this._currentUserText} ${this._partialTranscript}`)) {
       window.setTimeout(() => this.endConversation(), 450);
